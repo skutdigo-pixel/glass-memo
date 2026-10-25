@@ -233,8 +233,8 @@ function render(animate) {
   let i = 0;
   for (const sec of sections) {
     if (!sec.groups.length) continue;
-    const el = h(`<section class="sec sec-${sec.key}" data-sec="${sec.key}"><h3>${sec.label}<span>${sec.groups.reduce((n, g) => n + g.tasks.filter((t) => sec.key === 'done' || t.status !== 'done').length, 0)}</span></h3></section>`);
-    if (state.scope === 'day') {
+    const el = h(`<section class="sec sec-${sec.key}" data-sec="${sec.key}">${sec.label ? `<h3>${sec.label}<span>${sec.groups.reduce((n, g) => n + g.tasks.filter((t) => sec.key === 'done' || t.status !== 'done').length, 0)}</span></h3>` : ''}</section>`);
+    if (state.scope === 'day' || state.scope === 'week') {
       for (const g of sec.groups) {
         const head = groupHead(g, sec, min);
         if (sec.key === 'now' && !nowText) nowText = `${g.slot} ${head.sub}`;
@@ -244,14 +244,14 @@ function render(animate) {
     }
     for (const g of sec.groups) {
       const gk = `${state.scope}|${g.slot}|${g.s}`;
-      const open = state.collapsed.has(gk) ? !state.collapsed.get(gk) : sec.open;
+      const open = state.collapsed.has(gk) ? !state.collapsed.get(gk) : g.due && g.due < +clock().date.slice(8) && g.tasks.every((t) => t.status === 'done') ? false : sec.open;
       const gp = progress(g.tasks);
       const head = groupHead(g, sec, min);
       const grp = h(`<div class="grp${open ? ' open' : ''}" data-slot="${esc(g.slot)}">
         <button class="grp-h"><span class="g-name">${esc(g.slot || '—')}</span><span class="g-sub">${esc(head.sub)}</span><span class="g-n">${gp.done}/${gp.total}</span><span class="chev">${ICON.chev}</span></button>
         <div class="grp-b"><div class="grp-i"></div></div></div>`);
       const inner = grp.querySelector('.grp-i');
-      for (const t of g.tasks) inner.append(rowFor(t, animate ? i++ : -1, false));
+      for (const t of g.tasks) { const r = rowFor(t, animate ? i++ : -1, false); setSub(r, t, ''); inner.append(r); }
       grp.querySelector('.grp-h').onclick = () => { grp.classList.toggle('open'); state.collapsed.set(gk, !grp.classList.contains('open')); };
       el.append(grp);
     }
@@ -297,9 +297,12 @@ function daySections(tasks, min) {
 }
 
 function otherSections(tasks) {
-  const day = +clock().date.slice(8);
-  const groups = groupBySlot(tasks);
-  return [{ key: 'period', label: state.scope === 'week' ? '今週' : '今月', open: true, groups: groups.map((g) => ({ ...g, overdue: state.scope === 'month' && g.tasks.some((t) => t.due && t.due < day && t.status !== 'done') })) }];
+  if (state.scope === 'week') return [{ key: 'period', label: '', open: true, groups: [{ slot: '', s: null, e: null, tasks }] }];
+  const byDue = new Map();
+  for (const t of tasks) { const k = t.due ?? 99; if (!byDue.has(k)) byDue.set(k, []); byDue.get(k).push(t); }
+  const label = (d) => (d === 1 ? '月初 1日' : d >= 31 ? '月末' : d === 25 ? '25日 最終週' : `${d}日`);
+  const groups = [...byDue.entries()].sort((x, y) => x[0] - y[0]).map(([d, ts]) => ({ slot: label(d), s: null, e: null, tasks: ts, due: d }));
+  return [{ key: 'period', label: '', open: true, groups }];
 }
 
 function rowFor(task, i, defaultOpen) {
@@ -313,6 +316,7 @@ function rowFor(task, i, defaultOpen) {
 const isOpen = (row, task) => (state.open.has(task.id) ? state.open.get(task.id) : !!row._defaultOpen && !!task.items);
 
 function setSub(row, task, text) {
+  if (state.scope !== 'day' && !text) text = task.chip && !['月初', '月末', `${task.due}日`].includes(task.chip) ? task.chip : '';
   const n = task.items ? ` · ${(task.ticks || []).length}/${task.items.length}` : '';
   row.querySelector('.sub').textContent = (text || '') + (text && n ? n : n.replace(' · ', ''));
 }
@@ -378,7 +382,7 @@ function makeRow(task) {
       <div class="det"><div class="det-i"><div class="pad"></div><div class="det-t"></div><button class="man" hidden></button></div></div></div>
   </div>`);
   row.querySelector('.t').textContent = task.title;
-  if (task.chip) { const c = row.querySelector('.chip'); c.hidden = false; c.textContent = task.chip; }
+  if (task.tag) { const c = row.querySelector('.chip'); c.hidden = false; c.textContent = task.tag.t; c.style.setProperty('--tc', task.tag.c); }
   const hasDetail = !!(task.detail || task.manual || task.items);
   if (hasDetail) {
     row.querySelector('.det-t').textContent = task.detail || '';

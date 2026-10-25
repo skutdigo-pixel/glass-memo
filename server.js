@@ -49,7 +49,8 @@ function MANUAL_TEMPLATES() { return MANUAL.templates; }
 const COLS = 'id, title, status, created_at, scope, period, slot, t_start, t_end, tpl_id, manual, detail, sort, due, items, ticks';
 const TPL = new Map(MANUAL_TEMPLATES().map((t) => [t.id, t]));
 const shape = (r) => r && { ...r, items: r.items ? JSON.parse(r.items) : null, ticks: r.ticks ? JSON.parse(r.ticks) : [],
-  chip: TPL.get(r.tpl_id)?.chip ?? null, anchor: TPL.get(r.tpl_id)?.anchor ?? r.tpl_id ?? null };
+  chip: TPL.get(r.tpl_id)?.chip ?? null,
+  tag: (() => { const c = (MANUAL.cats || []).find((x) => x.ids.includes(r.manual)); return c ? { t: c.title, c: c.color } : null; })(), anchor: TPL.get(r.tpl_id)?.anchor ?? r.tpl_id ?? null };
 const q = {
   userBySub: db.prepare('SELECT * FROM users WHERE sub = ?'),
   insertUser: db.prepare('INSERT INTO users (sub, email, name, picture) VALUES (?,?,?,?)'),
