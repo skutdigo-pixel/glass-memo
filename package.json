@@ -1,0 +1,23 @@
+{
+  "name": "glass-memo",
+  "version": "1.0.0",
+  "description": "",
+  "directories": {
+    "test": "test"
+  },
+  "scripts": {
+    "start": "node server.js",
+    "dev": "DEV_AUTH=1 AI_MOCK=1 DATA_DIR=./data node server.js"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "module",
+  "dependencies": {
+    "@hono/node-server": "^2.1.5",
+    "hono": "^4.13.13"
+  },
+  "engines": {
+    "node": ">=24"
+  }
+}
