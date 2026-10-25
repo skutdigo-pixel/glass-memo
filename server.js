@@ -4,7 +4,8 @@ import { serveStatic } from '@hono/node-server/serve-static';
 import { getCookie, setCookie, deleteCookie } from 'hono/cookie';
 import { DatabaseSync } from 'node:sqlite';
 import { randomBytes, createHash } from 'node:crypto';
-import { mkdirSync } from 'node:fs';
+import { mkdirSync, readFileSync, existsSync } from 'node:fs';
+import { basename } from 'node:path';
 
 const env = process.env;
 const PROD = env.NODE_ENV === 'production';
@@ -32,7 +33,19 @@ CREATE TABLE IF NOT EXISTS tasks (
 );
 CREATE INDEX IF NOT EXISTS tasks_user ON tasks(user_id, status);
 `);
+for (const col of ["scope TEXT NOT NULL DEFAULT 'day'", "period TEXT NOT NULL DEFAULT ''", "slot TEXT", "t_start INTEGER", "t_end INTEGER",
+  "tpl_id TEXT", "manual TEXT", "detail TEXT", "sort INTEGER NOT NULL DEFAULT 9000", "due INTEGER"]) {
+  try { db.exec(`ALTER TABLE tasks ADD COLUMN ${col}`); } catch {}
+}
+db.exec(`UPDATE tasks SET period = strftime('%Y-%m-%d', created_at/1000 + 32400, 'unixepoch') WHERE period = '' AND tpl_id IS NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS tasks_tpl ON tasks(user_id, tpl_id, period) WHERE tpl_id IS NOT NULL;`);
 
+// manual content lives outside git (private/manual.json); the app works without it
+const MANUAL_PATH = env.MANUAL_PATH || './private/manual.json';
+const MANUAL = existsSync(MANUAL_PATH) ? JSON.parse(readFileSync(MANUAL_PATH, 'utf8')) : { manuals: [], templates: [] };
+const MEDIA_DIR = new URL('./private/media/', import.meta.url).pathname;
+
+const COLS = 'id, title, status, created_at, scope, period, slot, t_start, t_end, tpl_id, manual, detail, sort, due';
 const q = {
   userBySub: db.prepare('SELECT * FROM users WHERE sub = ?'),
   insertUser: db.prepare('INSERT INTO users (sub, email, name, picture) VALUES (?,?,?,?)'),
@@ -40,9 +53,13 @@ const q = {
   insertSession: db.prepare('INSERT INTO sessions (token, user_id, expires) VALUES (?,?,?)'),
   session: db.prepare('SELECT u.* FROM sessions s JOIN users u ON u.id = s.user_id WHERE s.token = ? AND s.expires > ?'),
   delSession: db.prepare('DELETE FROM sessions WHERE token = ?'),
-  tasks: db.prepare('SELECT id, title, status, created_at FROM tasks WHERE user_id = ? ORDER BY created_at DESC, id DESC'),
-  insertTask: db.prepare('INSERT INTO tasks (user_id, title, status, created_at, updated_at) VALUES (?,?,?,?,?)'),
-  task: db.prepare('SELECT id, title, status, created_at FROM tasks WHERE id = ? AND user_id = ?'),
+  tasks: db.prepare(`SELECT ${COLS} FROM tasks WHERE user_id = ? AND scope = ? AND period = ? ORDER BY sort, id`),
+  insertTask: db.prepare('INSERT INTO tasks (user_id, title, status, created_at, updated_at, scope, period, slot, sort) VALUES (?,?,?,?,?,?,?,?,?)'),
+  insertTpl: db.prepare(`INSERT OR IGNORE INTO tasks (user_id, title, status, created_at, updated_at, scope, period, slot, t_start, t_end, tpl_id, manual, detail, sort, due)
+    VALUES (?,?,'todo',?,?,?,?,?,?,?,?,?,?,?,?)`),
+  dupTask: db.prepare('SELECT id FROM tasks WHERE user_id=? AND scope=? AND period=? AND title=? AND manual=?'),
+  insertManualTask: db.prepare('INSERT INTO tasks (user_id, title, status, created_at, updated_at, scope, period, slot, manual, sort) VALUES (?,?,\'todo\',?,?,?,?,?,?,?)'),
+  task: db.prepare(`SELECT ${COLS} FROM tasks WHERE id = ? AND user_id = ?`),
   updateTask: db.prepare('UPDATE tasks SET title=?, status=?, updated_at=? WHERE id=? AND user_id=?'),
   delTask: db.prepare('DELETE FROM tasks WHERE id=? AND user_id=?'),
 };
@@ -63,7 +80,7 @@ const app = new Hono();
 app.use('/api/*', async (c, next) => {
   const token = getCookie(c, 'sid');
   c.set('user', token ? q.session.get(hash(token), Date.now()) ?? null : null);
-  if (c.req.method !== 'GET' && !(c.req.header('content-type') || '').includes('application/json')) {
+  if (c.req.method !== 'GET' && c.req.path !== '/api/ai/transcribe' && !(c.req.header('content-type') || '').includes('application/json')) {
     return c.json({ error: 'bad_request' }, 400);
   }
   await next();
@@ -146,19 +163,87 @@ app.post('/auth/logout', (c) => {
 // ---- tasks ----
 const cleanTitle = (t) => (typeof t === 'string' ? t.trim().slice(0, 500) : '');
 
-app.get('/api/tasks', authed, (c) => c.json(q.tasks.all(c.get('user').id)));
+// ---- periods: day = YYYY-MM-DD, week = Monday's date, month = YYYY-MM ----
+const pad = (n) => String(n).padStart(2, '0');
+function periodOf(scope, date) {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return null;
+  const d = new Date(date + 'T00:00:00Z');
+  if (Number.isNaN(d.getTime())) return null;
+  if (scope === 'day') return date;
+  if (scope === 'month') return date.slice(0, 7);
+  if (scope === 'week') { d.setUTCDate(d.getUTCDate() - ((d.getUTCDay() + 6) % 7)); return d.toISOString().slice(0, 10); }
+  return null;
+}
+function ensurePeriod(uid, scope, date, period) {
+  const dow = new Date(date + 'T00:00:00Z').getUTCDay();
+  const now = Date.now();
+  for (const t of MANUAL.templates) {
+    if (t.scope !== scope) continue;
+    if (scope === 'day') {
+      if (t.dow ? !t.dow.includes(dow) : dow === 0) continue; // closed on Sundays unless the item names the weekday
+    }
+    q.insertTpl.run(uid, t.title, now, now, scope, period, t.slot, t.time?.[0] ?? null, t.time?.[1] ?? null, t.id, t.manual, t.detail || null, t.sort ?? 5000, t.due ?? null);
+  }
+}
+
+app.get('/api/tasks', authed, (c) => {
+  const scope = c.req.query('scope') || 'day';
+  const date = c.req.query('date') || '';
+  const period = periodOf(scope, date);
+  if (!period) return c.json({ error: 'invalid' }, 400);
+  const uid = c.get('user').id;
+  ensurePeriod(uid, scope, date, period);
+  return c.json(q.tasks.all(uid, scope, period));
+});
 
 app.post('/api/tasks', authed, async (c) => {
   const body = await c.req.json().catch(() => ({}));
   const titles = (Array.isArray(body.titles) ? body.titles : [body.title]).map(cleanTitle).filter(Boolean).slice(0, 20);
   if (!titles.length) return c.json({ error: 'empty' }, 400);
+  const scope = ['day', 'week', 'month'].includes(body.scope) ? body.scope : 'day';
+  const period = periodOf(scope, body.date || '');
+  if (!period) return c.json({ error: 'invalid' }, 400);
   const uid = c.get('user').id;
   const now = Date.now();
   const out = titles.map((t, i) => {
-    const r = q.insertTask.run(uid, t, 'todo', now + i, now);
+    const r = q.insertTask.run(uid, t, 'todo', now + i, now, scope, period, 'メモ', 9000 + i);
     return q.task.get(Number(r.lastInsertRowid), uid);
   });
   return c.json(out, 201);
+});
+
+// ---- manuals ----
+app.get('/api/manuals', authed, (c) =>
+  c.json(MANUAL.manuals.map((m) => ({ id: m.id, title: m.title, kind: m.kind, items: m.items.length }))));
+
+app.get('/api/manuals/:id', authed, (c) => {
+  const m = MANUAL.manuals.find((x) => x.id === c.req.param('id'));
+  return m ? c.json(m) : c.json({ error: 'not_found' }, 404);
+});
+
+app.post('/api/manuals/:id/add', authed, async (c) => {
+  const m = MANUAL.manuals.find((x) => x.id === c.req.param('id'));
+  if (!m) return c.json({ error: 'not_found' }, 404);
+  const body = await c.req.json().catch(() => ({}));
+  const period = periodOf('day', body.date || '');
+  if (!period) return c.json({ error: 'invalid' }, 400);
+  const uid = c.get('user').id;
+  const now = Date.now();
+  let added = 0;
+  m.items.forEach((it, i) => {
+    if (q.dupTask.get(uid, 'day', period, it.title, m.id)) return;
+    q.insertManualTask.run(uid, it.title, now, now, 'day', period, m.title, m.id, 7000 + i);
+    added++;
+  });
+  return c.json({ added });
+});
+
+app.get('/media/:file', async (c) => {
+  const token = getCookie(c, 'sid');
+  if (!token || !q.session.get(hash(token), Date.now())) return c.text('unauthorized', 401);
+  const f = basename(c.req.param('file'));
+  if (!/\.jpg$/.test(f) || !existsSync(MEDIA_DIR + f)) return c.text('not found', 404);
+  return c.body(readFileSync(MEDIA_DIR + f), 200, { 'content-type': 'image/jpeg', 'cache-control': 'private, max-age=86400' });
 });
 
 app.patch('/api/tasks/:id', authed, async (c) => {
@@ -218,6 +303,20 @@ app.post('/api/ai/organize', authed, async (c) => {
   } catch (e) {
     return c.json({ error: e.message }, e.status || 500);
   }
+});
+
+app.post('/api/ai/transcribe', authed, async (c) => {
+  const buf = Buffer.from(await c.req.arrayBuffer());
+  if (!buf.length || buf.length > 8 * 1024 * 1024) return c.json({ error: 'invalid' }, 400);
+  if (!env.CF_ACCOUNT_ID || !env.CF_API_TOKEN) return c.json({ error: 'ai_not_configured' }, 503);
+  const res = await fetch(`https://api.cloudflare.com/client/v4/accounts/${env.CF_ACCOUNT_ID}/ai/run/@cf/openai/whisper-large-v3-turbo`, {
+    method: 'POST',
+    headers: { authorization: `Bearer ${env.CF_API_TOKEN}`, 'content-type': 'application/json' },
+    body: JSON.stringify({ audio: buf.toString('base64'), language: 'ja' }),
+  });
+  if (!res.ok) return c.json({ error: 'ai_failed' }, 502);
+  const text = ((await res.json())?.result?.text || '').trim();
+  return text ? c.json({ text }) : c.json({ error: 'ai_empty' }, 422);
 });
 
 app.get('/healthz', (c) => c.text('ok'));
