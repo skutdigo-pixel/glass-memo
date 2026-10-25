@@ -8,7 +8,7 @@ const TABS = [['day', '今日'], ['week', '今週'], ['month', '今月'], ['manu
 
 const $app = document.getElementById('app');
 const $sk = document.getElementById('skeleton');
-const state = { user: null, tasks: [], scope: 'day', devAuth: false, manuals: [], open: new Set(), collapsed: new Map() };
+const state = { user: null, tasks: [], scope: 'day', devAuth: false, manuals: [], cats: [], mode: 'memo', open: new Map(), showTicked: new Set(), collapsed: new Map() };
 const rows = new Map(); // task id -> row element (kept across re-renders so animations/gestures survive)
 
 // ?t=HH:MM and ?d=YYYY-MM-DD override the clock (used for testing time-based views)
@@ -26,6 +26,7 @@ const I = (p, w = 2.6) => `<svg viewBox="0 0 24 24" fill="none" stroke="currentC
 const ICON = {
   next: I('<path d="M5 12h14M13 6l6 6-6 6"/>'),
   check: I('<path d="M5 12.5l4.5 4.5L19 7.5"/>', 2.8),
+  reset: I('<path d="M4 12a8 8 0 108-8H7M7 1v6H1"/>', 2.4),
   back: I('<path d="M19 12H5M11 6l-6 6 6 6"/>'),
   trash: I('<path d="M4 7h16M10 11v6M14 11v6M6 7l1 12h10l1-12M9 7V4h6v3"/>', 2.4),
   spark: '<svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 2l2.2 6.3L20.5 10l-6.3 1.7L12 18l-2.2-6.3L3.5 10l6.3-1.7zM19 15l.9 2.1 2.1.9-2.1.9L19 21l-.9-2.1-2.1-.9 2.1-.9z"/></svg>',
@@ -34,6 +35,16 @@ const ICON = {
   stop: '<svg viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="6" width="12" height="12" rx="3"/></svg>',
   clip: I('<path d="M20 11l-8.5 8.5a5 5 0 01-7-7L13 4a3.3 3.3 0 014.7 4.7L9.2 17.2a1.7 1.7 0 01-2.4-2.4L14 7.6"/>', 2.2),
   chev: I('<path d="M9 6l6 6-6 6"/>', 2.4),
+  cat: {
+    clock: I('<circle cx="12" cy="12" r="9"/><path d="M12 7v5l3.5 2"/>', 2.2),
+    drop: I('<path d="M12 3c3.5 4.5 6 7.5 6 11a6 6 0 01-12 0c0-3.5 2.5-6.5 6-11z"/>', 2.2),
+    user: I('<circle cx="10" cy="8" r="4"/><path d="M3 20a7 7 0 0114 0M18 8v6M15 11h6"/>', 2.2),
+    monitor: I('<rect x="3" y="4" width="18" height="12" rx="2"/><path d="M8 20h8M12 16v4"/>', 2.2),
+    yen: I('<circle cx="12" cy="12" r="9"/><path d="M8.5 7l3.5 5 3.5-5M8.5 12h7M8.5 15h7M12 12v6"/>', 2),
+    star: I('<path d="M12 3l2.7 5.6 6.1.9-4.4 4.3 1 6.1L12 17l-5.5 2.9 1-6.1L3.1 9.5l6.1-.9z"/>', 2),
+  },
+  ask: I('<path d="M9.5 9a2.5 2.5 0 114 2c-.9.7-1.5 1.2-1.5 2.2M12 17h.01"/><circle cx="12" cy="12" r="9"/>', 2.2),
+  x: I('<path d="M6 6l12 12M18 6L6 18"/>', 2.4),
   g: '<svg viewBox="0 0 48 48"><path fill="#EA4335" d="M24 9.5c3.5 0 6.6 1.2 9.1 3.6l6.8-6.8C35.8 2.4 30.3 0 24 0 14.6 0 6.5 5.4 2.6 13.2l7.9 6.1C12.4 13.6 17.7 9.5 24 9.5z"/><path fill="#4285F4" d="M46.5 24.5c0-1.6-.1-3.1-.4-4.5H24v9h12.7c-.6 3-2.2 5.5-4.7 7.2l7.6 5.9c4.4-4.1 6.9-10.1 6.9-17.6z"/><path fill="#FBBC05" d="M10.5 28.7a14.5 14.5 0 010-9.4l-7.9-6.1a24 24 0 000 21.6z"/><path fill="#34A853" d="M24 48c6.5 0 11.9-2.1 15.9-5.8l-7.6-5.9c-2.1 1.4-4.9 2.3-8.3 2.3-6.3 0-11.6-4.1-13.5-9.8l-7.9 6.1C6.5 42.6 14.6 48 24 48z"/></svg>',
 };
 
@@ -95,6 +106,7 @@ function showMain() {
       </div>
       <button class="avatar glass" data-testid="avatar" aria-label="account"></button>
     </div>`), h('<div class="view" data-testid="view"></div>'), h(`
+    <div class="modes glass" data-testid="modes"><i></i><button type="button" data-mode="memo" data-testid="mode-memo">メモ</button><button type="button" data-mode="ask" data-testid="mode-ask">質問</button></div>`), h(`
     <form class="composer glass" autocomplete="off">
       <button type="button" class="ib clip" data-testid="attach" aria-label="audio file">${ICON.clip}</button>
       <input type="file" accept="audio/*,video/mp4" hidden data-testid="file">
@@ -120,6 +132,7 @@ function showMain() {
   av.onclick = toggleMenu;
 
   $app.querySelectorAll('.tab').forEach((b) => (b.onclick = () => setScope(b.dataset.tab)));
+  $app.querySelectorAll('.modes button').forEach((b) => (b.onclick = () => setMode(b.dataset.mode)));
   $composer.onsubmit = (e) => { e.preventDefault(); submit(); };
   $input.addEventListener('input', () => { autosize(); syncButtons(); });
   $input.addEventListener('keydown', (e) => {
@@ -136,9 +149,17 @@ function showMain() {
 }
 
 function autosize() { $input.style.height = 'auto'; $input.style.height = Math.min($input.scrollHeight, innerHeight * 0.3) + 'px'; }
+function setMode(mode) {
+  state.mode = mode;
+  const m = $app.querySelector('.modes');
+  m.dataset.mode = mode;
+  m.querySelectorAll('button').forEach((b) => b.setAttribute('aria-pressed', b.dataset.mode === mode));
+  $composer.classList.toggle('ask', mode === 'ask');
+  syncButtons();
+}
 function syncButtons() {
   const has = !!$input.value.trim();
-  $send.hidden = $ai.hidden = !has;
+  $send.hidden = !has; $ai.hidden = !has || state.mode === 'ask';
   $composer.querySelector('.mic').hidden = has;
 }
 
@@ -160,7 +181,7 @@ async function setScope(scope, initial = false) {
   state.scope = scope;
   $pill.style.transform = `translateX(${TABS.findIndex(([k]) => k === scope) * 100}%)`;
   $app.querySelectorAll('.tab').forEach((b) => b.setAttribute('aria-selected', b.dataset.tab === scope));
-  $composer.hidden = scope === 'manual';
+  setMode(scope === 'manual' ? 'ask' : 'memo');
   rows.clear();
   document.querySelector('.manual-doc')?.remove();
   if (scope === 'manual') return renderManualList();
@@ -212,24 +233,32 @@ function render(animate) {
   let i = 0;
   for (const sec of sections) {
     if (!sec.groups.length) continue;
-    const el = h(`<section class="sec sec-${sec.key}" data-sec="${sec.key}"><h3>${sec.label}<span>${sec.groups.reduce((n, g) => n + g.tasks.filter((t) => t.status !== 'done').length, 0)}</span></h3></section>`);
+    const el = h(`<section class="sec sec-${sec.key}" data-sec="${sec.key}"><h3>${sec.label}<span>${sec.groups.reduce((n, g) => n + g.tasks.filter((t) => sec.key === 'done' || t.status !== 'done').length, 0)}</span></h3></section>`);
+    if (state.scope === 'day') {
+      for (const g of sec.groups) {
+        const head = groupHead(g, sec, min);
+        if (sec.key === 'now' && !nowText) nowText = `${g.slot} ${head.sub}`;
+        for (const t of g.tasks) { const r = rowFor(t, animate ? i++ : -1, sec.key === 'now'); setSub(r, t, head.sub); el.append(r); }
+      }
+      list.append(el); continue;
+    }
     for (const g of sec.groups) {
       const gk = `${state.scope}|${g.slot}|${g.s}`;
       const open = state.collapsed.has(gk) ? !state.collapsed.get(gk) : sec.open;
       const gp = progress(g.tasks);
       const head = groupHead(g, sec, min);
-      if (sec.key === 'now' && !nowText) nowText = `${g.slot} ${head.sub}`;
       const grp = h(`<div class="grp${open ? ' open' : ''}" data-slot="${esc(g.slot)}">
         <button class="grp-h"><span class="g-name">${esc(g.slot || '—')}</span><span class="g-sub">${esc(head.sub)}</span><span class="g-n">${gp.done}/${gp.total}</span><span class="chev">${ICON.chev}</span></button>
         <div class="grp-b"><div class="grp-i"></div></div></div>`);
       const inner = grp.querySelector('.grp-i');
-      for (const t of g.tasks) inner.append(rowFor(t, animate ? i++ : -1));
+      for (const t of g.tasks) inner.append(rowFor(t, animate ? i++ : -1, false));
       grp.querySelector('.grp-h').onclick = () => { grp.classList.toggle('open'); state.collapsed.set(gk, !grp.classList.contains('open')); };
       el.append(grp);
     }
     list.append(el);
   }
   if (!tasks.length) list.append(h('<div class="empty"></div>'));
+  if (!tasks.length && state.scope === 'day' && new Date(clock().date + 'T00:00:00').getDay() === 0) nowText = '日曜休み';
   hero.querySelector('.now-slot').textContent = nowText;
   frag.append(list);
   const scrollTop = $view.querySelector('.list')?.scrollTop ?? 0;
@@ -273,11 +302,19 @@ function otherSections(tasks) {
   return [{ key: 'period', label: state.scope === 'week' ? '今週' : '今月', open: true, groups: groups.map((g) => ({ ...g, overdue: state.scope === 'month' && g.tasks.some((t) => t.due && t.due < day && t.status !== 'done') })) }];
 }
 
-function rowFor(task, i) {
+function rowFor(task, i, defaultOpen) {
   let row = rows.get(task.id);
   if (!row) { row = makeRow(task); rows.set(task.id, row); if (i >= 0) { row.classList.add('enter'); row.style.setProperty('--i', Math.min(i, 12)); row.addEventListener('animationend', () => row.classList.remove('enter'), { once: true }); } }
+  row._defaultOpen = defaultOpen;
   paintRow(row, task);
   return row;
+}
+
+const isOpen = (row, task) => (state.open.has(task.id) ? state.open.get(task.id) : !!row._defaultOpen && !!task.items);
+
+function setSub(row, task, text) {
+  const n = task.items ? ` · ${(task.ticks || []).length}/${task.items.length}` : '';
+  row.querySelector('.sub').textContent = (text || '') + (text && n ? n : n.replace(' · ', ''));
 }
 
 function paintRow(row, task) {
@@ -286,24 +323,68 @@ function paintRow(row, task) {
   card.querySelector('.st').style.background = COLOR[task.status];
   const late = state.scope === 'month' && task.due && task.due < +clock().date.slice(8) && task.status !== 'done';
   card.classList.toggle('late', !!late);
-  row.classList.toggle('open', state.open.has(task.id));
+  row.classList.toggle('open', isOpen(row, task));
+  if (task.items) renderPad(row, task);
+}
+
+function renderPad(row, task) {
+  const pad = row.querySelector('.pad');
+  const ticks = new Set(task.ticks || []);
+  const showDone = state.showTicked.has(task.id);
+  pad.replaceChildren();
+  let lastSec = null;
+  task.items.forEach((it, idx) => {
+    const on = ticks.has(idx);
+    if (on && !showDone) return;
+    if (it.s && it.s !== lastSec) { lastSec = it.s; pad.append(h(`<div class="pad-s">${esc(it.s)}</div>`)); }
+    const li = h(`<div class="pi${on ? ' on' : ''}" data-i="${idx}"><button class="pc" aria-label="check">${ICON.check}</button><div class="pt"><span>${esc(it.t)}</span>${it.d ? `<div class="pd">${esc(it.d)}</div>` : ''}</div></div>`);
+    li.querySelector('.pc').onclick = (e) => { e.stopPropagation(); tickItem(row, task, idx, li); };
+    if (it.d) li.querySelector('.pt').onclick = () => li.classList.toggle('more');
+    pad.append(li);
+  });
+  const n = ticks.size;
+  if (n) {
+    const b = h(`<button class="pad-more">${showDone ? '済を隠す' : `済 ${n}`}</button>`);
+    b.onclick = () => { showDone ? state.showTicked.delete(task.id) : state.showTicked.add(task.id); renderPad(row, task); };
+    pad.append(b);
+  }
+}
+
+async function tickItem(row, task, idx, li) {
+  const ticks = new Set(task.ticks || []);
+  const on = !ticks.has(idx);
+  on ? ticks.add(idx) : ticks.delete(idx);
+  li.classList.toggle('on', on);
+  if (on && !state.showTicked.has(task.id)) {
+    const h0 = li.offsetHeight;
+    li.animate([{ height: h0 + 'px', opacity: 1 }, { height: '0px', opacity: 0, marginTop: '-6px' }], { duration: 320, delay: 140, easing: 'cubic-bezier(.22,1,.36,1)', fill: 'forwards' });
+    li.style.overflow = 'hidden';
+    await sleep(440);
+  }
+  task.ticks = [...ticks].sort((a, b) => a - b);
+  const total = task.items.length;
+  const next = task.ticks.length === total ? 'done' : task.ticks.length ? 'doing' : 'todo';
+  const body = { ticks: task.ticks };
+  if (next !== task.status) { task.status = next; body.status = next; }
+  render(false);
+  try { await task.pending; await api(`/api/tasks/${task.id}`, 'PATCH', body); } catch { reload(); }
 }
 
 function makeRow(task) {
   const row = h(`<div class="row" data-id="${task.id}" data-testid="task">
     <div class="reveal r"></div><div class="reveal l"></div>
-    <div class="card glass"><span class="st"></span><div class="t"></div>
-      <div class="det"><div class="det-i"><div class="det-t"></div><button class="man" hidden></button></div></div></div>
+    <div class="card glass"><span class="st"></span><div class="t"></div><div class="sub"></div>
+      <div class="det"><div class="det-i"><div class="pad"></div><div class="det-t"></div><button class="man" hidden></button></div></div></div>
   </div>`);
   row.querySelector('.t').textContent = task.title;
-  const hasDetail = !!(task.detail || task.manual);
+  const hasDetail = !!(task.detail || task.manual || task.items);
   if (hasDetail) {
     row.querySelector('.det-t').textContent = task.detail || '';
     row.classList.add('has-detail');
     if (task.manual) {
       const b = row.querySelector('.man');
       b.hidden = false; b.dataset.manual = task.manual; b.textContent = 'マニュアル';
-      b.onclick = (e) => { e.stopPropagation(); openManual(task.manual); };
+      b.onclick = (e) => { e.stopPropagation(); loadManuals().then(() => openManual(task.manual)); };
     }
   }
   attachSwipe(row, task);
@@ -339,6 +420,7 @@ function submit() {
   if (!v) return;
   $input.value = ''; autosize(); syncButtons();
   $input.focus();
+  if (state.mode === 'ask') return askQ(v);
   addTitles([v]);
 }
 
@@ -388,6 +470,7 @@ async function transcribeAndAdd(blob, type) {
   btn.classList.add('busy'); $composer.classList.add('working');
   try {
     const { text } = await api('/api/ai/transcribe', 'POST', null, { data: blob, type: type.split(';')[0] });
+    if (state.mode === 'ask') { await askQ(text); return; }
     let tasks;
     try { tasks = await organize(text); } catch { tasks = [text]; }
     await addTitles(tasks);
@@ -400,18 +483,20 @@ const nextOf = (s) => STATUSES[STATUSES.indexOf(s) + 1];
 const prevOf = (s) => STATUSES[STATUSES.indexOf(s) - 1];
 
 function targets(task) {
-  const n = nextOf(task.status), p = prevOf(task.status);
-  const memo = !task.tpl_id && !task.manual; // manual-derived tasks are never deleted by swipe
+  const n = STATUSES[(STATUSES.indexOf(task.status) + 1) % 3];
+  const p = STATUSES[(STATUSES.indexOf(task.status) + 2) % 3];
+  const memo = !task.tpl_id && !task.manual && !task.items;
+  const icon = (to, back) => (to === 'done' ? ICON.check : to === 'todo' ? (back ? ICON.back : ICON.reset) : back ? ICON.back : ICON.next);
   return {
-    right: n ? { kind: 'move', to: n, color: COLOR[n], icon: n === 'done' ? ICON.check : ICON.next } : null,
-    left: p ? { kind: 'move', to: p, color: COLOR[p], icon: ICON.back } : memo ? { kind: 'delete', color: DELETE_COLOR, icon: ICON.trash } : null,
+    right: { kind: 'move', to: n, color: COLOR[n], icon: icon(n, false) },
+    left: task.status === 'todo' && memo ? { kind: 'delete', color: DELETE_COLOR, icon: ICON.trash } : { kind: 'move', to: p, color: COLOR[p], icon: icon(p, true) },
   };
 }
 
 function attachSwipe(row, task) {
   const card = row.querySelector('.card');
   const rv = { right: row.querySelector('.reveal.r'), left: row.querySelector('.reveal.l') };
-  let sx = 0, sy = 0, dx = 0, id = null, locked = false, lastX = 0, lastT = 0, v = 0, busy = false, moved = false;
+  let sx = 0, sy = 0, dx = 0, id = null, locked = false, lastX = 0, lastT = 0, v = 0, busy = false, moved = false, downEl = null;
   const cur = () => state.tasks.find((t) => String(t.id) === row.dataset.id) || task;
 
   const paint = () => {
@@ -426,8 +511,8 @@ function attachSwipe(row, task) {
   };
 
   card.addEventListener('pointerdown', (e) => {
-    if (busy || id !== null || e.target.closest('.man') || (e.pointerType === 'mouse' && e.button !== 0)) return;
-    id = e.pointerId; sx = lastX = e.clientX; sy = e.clientY; dx = 0; locked = false; moved = false; lastT = performance.now(); v = 0;
+    if (busy || id !== null || e.target.closest('.man, .pc, .pad-more') || (e.pointerType === 'mouse' && e.button !== 0)) return;
+    downEl = e.target; id = e.pointerId; sx = lastX = e.clientX; sy = e.clientY; dx = 0; locked = false; moved = false; lastT = performance.now(); v = 0;
   });
   card.addEventListener('pointermove', (e) => {
     if (e.pointerId !== id) return;
@@ -447,7 +532,7 @@ function attachSwipe(row, task) {
     const wasLocked = locked, wasMoved = moved;
     id = null;
     if (!wasLocked) {
-      if (e.type === 'pointerup' && !wasMoved && row.classList.contains('has-detail')) toggleDetail(row, cur());
+      if (e.type === 'pointerup' && !wasMoved && row.classList.contains('has-detail') && !downEl?.closest('.pad, .man')) toggleDetail(row, cur());
       return;
     }
     card.classList.remove('drag');
@@ -482,6 +567,8 @@ function attachSwipe(row, task) {
     }
     // status change happens in place: the card re-enters from the opposite side with its new look
     t.status = cfg.to;
+    const body = { status: cfg.to };
+    if (t.items) { t.ticks = cfg.to === 'done' ? t.items.map((_, k) => k) : cfg.to === 'todo' ? [] : t.ticks; body.ticks = t.ticks; }
     card.style.transition = 'none'; card.style.transform = ''; card.style.opacity = '';
     rv.left.style.opacity = rv.right.style.opacity = 0; rv[side].classList.remove('hot');
     paintRow(row, t);
@@ -489,13 +576,13 @@ function attachSwipe(row, task) {
     requestAnimationFrame(() => { card.style.transition = ''; });
     busy = false;
     render(false);
-    try { await t.pending; await api(`/api/tasks/${t.id}`, 'PATCH', { status: cfg.to }); } catch { reload(); }
+    try { await t.pending; await api(`/api/tasks/${t.id}`, 'PATCH', body); } catch { reload(); }
   }
 }
 
 function toggleDetail(row, task) {
-  const open = !state.open.has(task.id);
-  open ? state.open.add(task.id) : state.open.delete(task.id);
+  const open = !isOpen(row, task);
+  state.open.set(task.id, open);
   row.classList.toggle('open', open);
 }
 
@@ -504,36 +591,146 @@ async function reload() {
 }
 
 /* ---------------- manuals ---------------- */
+async function loadManuals() {
+  if (state.manuals.length) return true;
+  try { const r = await api('/api/manuals'); state.manuals = r.manuals; state.cats = r.cats; return true; } catch { return false; }
+}
+
 async function renderManualList() {
   $view.replaceChildren(skeletonList());
-  if (!state.manuals.length) { try { state.manuals = await api('/api/manuals'); } catch { return; } }
-  if (state.scope !== 'manual') return;
-  const list = h('<div class="list manual-list" data-testid="manual-list"></div>');
-  state.manuals.forEach((m, i) => {
-    const b = h(`<button class="mcard glass enter" data-testid="manual" data-id="${m.id}" style="--i:${Math.min(i, 12)}"><span class="mk">${esc(m.kind)}</span><span class="mt">${esc(m.title)}</span><span class="chev">${ICON.chev}</span></button>`);
-    b.onclick = () => openManual(m.id);
-    list.append(b);
+  if (!(await loadManuals()) || state.scope !== 'manual') return;
+  const list = h('<div class="list" data-testid="manual-list"><div class="cat-grid"></div></div>');
+  const grid = list.firstElementChild;
+  state.cats.forEach((c, i) => {
+    const n = c.ids.length;
+    const b = h(`<button class="cat glass enter" data-testid="cat" data-id="${c.id}" style="--i:${i};--c:${c.color}">
+      <span class="cat-i">${ICON.cat[c.icon]}</span><span class="cat-t">${esc(c.title)}</span><span class="cat-n">${n}</span></button>`);
+    b.onclick = () => openCat(c.id);
+    grid.append(b);
   });
   $view.replaceChildren(list);
+}
+
+function openCat(id) {
+  const c = state.cats.find((x) => x.id === id);
+  document.querySelector('.manual-doc')?.remove();
+  const doc = h(`<div class="manual-doc glass" data-testid="cat-doc" style="--c:${c.color}">
+    <div class="md-top"><button class="md-back" aria-label="back">${ICON.back}</button><h2>${esc(c.title)}</h2></div>
+    <div class="md-body"><div class="mlist"></div></div></div>`);
+  c.ids.forEach((mid, i) => {
+    const m = state.manuals.find((x) => x.id === mid);
+    const b = h(`<button class="mcard glass enter" data-testid="manual" data-id="${m.id}" style="--i:${i}"><span class="mk">${esc(m.kind)}</span><span class="mt">${esc(m.title)}</span><span class="chev">${ICON.chev}</span></button>`);
+    b.onclick = () => openManual(m.id);
+    doc.querySelector('.mlist').append(b);
+  });
+  closeable(doc);
+  $app.append(doc);
+}
+
+function closeable(doc) {
+  doc.querySelector('.md-back').onclick = () => { doc.classList.add('out'); setTimeout(() => doc.remove(), 350); };
+}
+
+/* original text -> structured blocks (every line is kept; markers become visual bullets/boxes) */
+function renderBody(text, mid, onTick) {
+  const out = h('<div class="md-text"></div>');
+  const lines = text.split('\n');
+  let list = null, table = null, ci = 0;
+  const closeAll = () => { list = null; table = null; };
+  const sk = `chk-${mid}-${clock().date}`;
+  const stored = (() => { try { return JSON.parse(localStorage.getItem(sk) || '{}'); } catch { return {}; } })();
+  const save = () => { try { localStorage.setItem(sk, JSON.stringify(stored)); } catch {} onTick?.(Object.values(stored).filter(Boolean).length); };
+  for (const raw of lines) {
+    const l = raw.trim();
+    if (!l) { closeAll(); continue; }
+    if (l.includes(' | ')) {
+      if (!table) { table = h('<div class="tbl"></div>'); out.append(table); list = null; }
+      const row = h('<div class="tr"></div>');
+      l.split(' | ').forEach((cell) => row.append(h(`<div class="td">${esc(cell)}</div>`)));
+      row.style.setProperty('--n', row.children.length);
+      table.append(row); continue;
+    }
+    table = null;
+    let m;
+    if ((m = l.match(/^##\s+(.+)/))) { closeAll(); out.append(h(`<h3>${esc(m[1])}</h3>`)); continue; }
+    if (/^(【.+】|[■●⏰▼]\s?|第\d+章|[ⅠⅡⅢⅣ]、|\d+[.．]\s*[■•]?\s*\S)/.test(l) && l.length < 48 && !/^[①-⑩]/.test(l)) { closeAll(); out.append(h(`<h4>${esc(l.replace(/^[■●▼]\s?/, ''))}</h4>`)); continue; }
+    if (!list) { list = h('<ul class="ls"></ul>'); out.append(list); }
+    if ((m = l.match(/^[□☐◻]︎?\s*(.*)/))) {
+      const key = 'c' + ci++;
+      const li = h(`<li class="chk${stored[key] ? ' on' : ''}"><i>${ICON.check}</i><span>${esc(m[1])}</span></li>`);
+      li.onclick = () => { li.classList.toggle('on'); stored[key] = li.classList.contains('on'); li.classList.toggle('gone', stored[key]); save(); };
+      if (stored[key]) li.classList.add('gone');
+      list.append(li); continue;
+    }
+    if ((m = l.match(/^[・\-•]\s*(.*)/))) { list.append(h(`<li class="bl"><span>${esc(m[1])}</span></li>`)); continue; }
+    if ((m = l.match(/^([①-⑩]|\d+[)）.])\s*(.*)/))) { list.append(h(`<li class="nl"><b>${esc(m[1])}</b><span>${esc(m[2])}</span></li>`)); continue; }
+    list.append(h(`<li class="pl"><span>${esc(l)}</span></li>`));
+  }
+  return out;
+}
+
+function renderVisual(v) {
+  if (v.type === 'flow') {
+    const el = h(`<div class="vis flow"><h4>${esc(v.title)}</h4></div>`);
+    v.steps.forEach((st, i) => {
+      el.append(h(`<div class="node" style="--i:${i}"><b>${i + 1}</b><div><div class="n-t">${esc(st.t)}</div>${st.d ? `<div class="n-d">${esc(st.d)}</div>` : ''}</div></div>`));
+      if (i < v.steps.length - 1) el.append(h(`<div class="arrow" style="--i:${i}"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M12 4v14M6 13l6 6 6-6"/></svg></div>`));
+    });
+    if (v.note) el.append(h(`<div class="flow-note">${esc(v.note)}</div>`));
+    return el;
+  }
+  const el = h(`<div class="vis tl"><h4>${esc(v.title)}</h4></div>`);
+  v.rows.forEach((r, i) => el.append(h(`<div class="tl-r" style="--i:${i}"><div class="tl-time">${esc(r.time)}</div><div class="tl-dot"></div><div class="tl-b">${r.label ? `<div class="n-t">${esc(r.label)}</div>` : ''}${r.sub ? `<div class="n-d">${esc(r.sub)}</div>` : ''}${(r.lines || []).map((x) => `<div class="tl-l">${esc(x)}</div>`).join('')}</div></div>`)));
+  return el;
 }
 
 async function openManual(id) {
   let m;
   try { m = await api(`/api/manuals/${id}`); } catch { return; }
-  document.querySelector('.manual-doc')?.remove();
-  const doc = h(`<div class="manual-doc glass" data-testid="manual-doc">
+  document.querySelector('.manual-doc.md')?.remove();
+  const cat = state.cats.find((c) => c.ids.includes(id));
+  const doc = h(`<div class="manual-doc md glass" data-testid="manual-doc" style="--c:${cat?.color || '#4f7cff'}">
     <div class="md-top"><button class="md-back" aria-label="back">${ICON.back}</button><h2>${esc(m.title)}</h2></div>
-    <div class="md-body">
-      ${m.items.length ? `<button class="md-add go-btn" data-testid="manual-add">${ICON.check}<span>${esc('今日に追加')}</span></button>` : ''}
-      ${m.media.map((f) => `<img class="md-img" src="/media/${esc(f)}" alt="" loading="lazy">`).join('')}
-      <pre class="md-text">${esc(m.body)}</pre>
-    </div></div>`);
-  doc.querySelector('.md-back').onclick = () => { doc.classList.add('out'); setTimeout(() => doc.remove(), 350); };
-  const add = doc.querySelector('.md-add');
-  if (add) add.onclick = async () => {
-    try { const r = await api(`/api/manuals/${id}/add`, 'POST', { date: clock().date }); toast(`+${r.added}`); } catch { toast('Error'); }
-  };
+    <div class="md-body"></div></div>`);
+  const body = doc.querySelector('.md-body');
+  if (m.items.length) {
+    const add = h(`<button class="md-add go-btn" data-testid="manual-add">${ICON.check}<span>今日に追加</span></button>`);
+    add.onclick = async () => { try { const r = await api(`/api/manuals/${id}/add`, 'POST', { date: clock().date }); toast(`+${r.added}`); } catch { toast('Error'); } };
+    body.append(add);
+  }
+  (m.visuals || []).forEach((v) => body.append(renderVisual(v)));
+  m.media.forEach((f) => body.append(h(`<img class="md-img" src="/media/${esc(f)}" alt="" loading="lazy">`)));
+  if (m.body) {
+    const seg = h('<div class="seg" data-testid="seg"><i></i><button data-v="rich" aria-pressed="true">整形</button><button data-v="raw" aria-pressed="false">原文</button></div>');
+    const chip = h('<button class="chk-chip" hidden></button>');
+    const rich = renderBody(m.body, id, (n) => { chip.hidden = !n; chip.textContent = rich.classList.contains('show-done') ? '済を隠す' : `済 ${n}`; });
+    const raw = h(`<pre class="md-raw" hidden>${esc(m.body)}</pre>`);
+    seg.querySelectorAll('button').forEach((b) => (b.onclick = () => {
+      seg.dataset.v = b.dataset.v;
+      seg.querySelectorAll('button').forEach((x) => x.setAttribute('aria-pressed', x === b));
+      rich.hidden = b.dataset.v === 'raw'; raw.hidden = b.dataset.v !== 'raw';
+    }));
+    chip.onclick = () => { rich.classList.toggle('show-done'); chip.textContent = rich.classList.contains('show-done') ? '済を隠す' : `済 ${rich.querySelectorAll('.chk.on').length}`; };
+    body.append(seg, chip, rich, raw);
+    { const n = rich.querySelectorAll('.chk.on').length; if (n) { chip.hidden = false; chip.textContent = `済 ${n}`; } }
+  }
+  closeable(doc);
   $app.append(doc);
+}
+
+/* ---------------- ask the manuals ---------------- */
+async function askQ(q) {
+  document.querySelector('.answer')?.remove();
+  const el = h(`<div class="answer glass" data-testid="answer"><button class="a-x" aria-label="close">${ICON.x}</button>
+    <div class="a-q">${esc(q)}</div><div class="a-b"><div class="sk sk-line"></div><div class="sk sk-line w2"></div><div class="sk sk-line w3"></div></div></div>`);
+  el.querySelector('.a-x').onclick = () => { el.classList.add('out'); setTimeout(() => el.remove(), 300); };
+  $app.append(el);
+  try {
+    const r = await api('/api/ask', 'POST', { q });
+    const b = el.querySelector('.a-b');
+    b.innerHTML = `<div class="a-t" data-testid="answer-text">${esc(r.answer)}</div><div class="a-s">${r.sources.map((s) => `<button data-id="${esc(s.id)}">${esc(s.title)}</button>`).join('')}</div>`;
+    b.querySelectorAll('.a-s button').forEach((x) => (x.onclick = async () => { await loadManuals(); openManual(x.dataset.id); }));
+  } catch (e) { if (e.message !== 'unauthorized') { el.querySelector('.a-b').textContent = 'Error'; } }
 }
 
 boot();

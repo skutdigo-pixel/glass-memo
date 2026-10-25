@@ -34,7 +34,7 @@ CREATE TABLE IF NOT EXISTS tasks (
 CREATE INDEX IF NOT EXISTS tasks_user ON tasks(user_id, status);
 `);
 for (const col of ["scope TEXT NOT NULL DEFAULT 'day'", "period TEXT NOT NULL DEFAULT ''", "slot TEXT", "t_start INTEGER", "t_end INTEGER",
-  "tpl_id TEXT", "manual TEXT", "detail TEXT", "sort INTEGER NOT NULL DEFAULT 9000", "due INTEGER"]) {
+  "tpl_id TEXT", "manual TEXT", "detail TEXT", "sort INTEGER NOT NULL DEFAULT 9000", "due INTEGER", "items TEXT", "ticks TEXT"]) {
   try { db.exec(`ALTER TABLE tasks ADD COLUMN ${col}`); } catch {}
 }
 db.exec(`UPDATE tasks SET period = strftime('%Y-%m-%d', created_at/1000 + 32400, 'unixepoch') WHERE period = '' AND tpl_id IS NULL;
@@ -45,7 +45,8 @@ const MANUAL_PATH = env.MANUAL_PATH || './private/manual.json';
 const MANUAL = existsSync(MANUAL_PATH) ? JSON.parse(readFileSync(MANUAL_PATH, 'utf8')) : { manuals: [], templates: [] };
 const MEDIA_DIR = new URL('./private/media/', import.meta.url).pathname;
 
-const COLS = 'id, title, status, created_at, scope, period, slot, t_start, t_end, tpl_id, manual, detail, sort, due';
+const COLS = 'id, title, status, created_at, scope, period, slot, t_start, t_end, tpl_id, manual, detail, sort, due, items, ticks';
+const shape = (r) => r && { ...r, items: r.items ? JSON.parse(r.items) : null, ticks: r.ticks ? JSON.parse(r.ticks) : [] };
 const q = {
   userBySub: db.prepare('SELECT * FROM users WHERE sub = ?'),
   insertUser: db.prepare('INSERT INTO users (sub, email, name, picture) VALUES (?,?,?,?)'),
@@ -55,10 +56,14 @@ const q = {
   delSession: db.prepare('DELETE FROM sessions WHERE token = ?'),
   tasks: db.prepare(`SELECT ${COLS} FROM tasks WHERE user_id = ? AND scope = ? AND period = ? ORDER BY sort, id`),
   insertTask: db.prepare('INSERT INTO tasks (user_id, title, status, created_at, updated_at, scope, period, slot, sort) VALUES (?,?,?,?,?,?,?,?,?)'),
-  insertTpl: db.prepare(`INSERT OR IGNORE INTO tasks (user_id, title, status, created_at, updated_at, scope, period, slot, t_start, t_end, tpl_id, manual, detail, sort, due)
-    VALUES (?,?,'todo',?,?,?,?,?,?,?,?,?,?,?,?)`),
-  dupTask: db.prepare('SELECT id FROM tasks WHERE user_id=? AND scope=? AND period=? AND title=? AND manual=?'),
-  insertManualTask: db.prepare('INSERT INTO tasks (user_id, title, status, created_at, updated_at, scope, period, slot, manual, sort) VALUES (?,?,\'todo\',?,?,?,?,?,?,?)'),
+  insertTpl: db.prepare(`INSERT INTO tasks (user_id, title, status, created_at, updated_at, scope, period, slot, t_start, t_end, tpl_id, manual, detail, sort, due, items)
+    VALUES (?,?,'todo',?,?,?,?,?,?,?,?,?,?,?,?,?)
+    ON CONFLICT(user_id, tpl_id, period) WHERE tpl_id IS NOT NULL DO UPDATE SET
+      title=excluded.title, slot=excluded.slot, t_start=excluded.t_start, t_end=excluded.t_end, manual=excluded.manual,
+      detail=excluded.detail, sort=excluded.sort, due=excluded.due, items=excluded.items`),
+  dupTask: db.prepare('SELECT id FROM tasks WHERE user_id=? AND scope=? AND period=? AND manual=? AND tpl_id IS NULL'),
+  insertManualTask: db.prepare('INSERT INTO tasks (user_id, title, status, created_at, updated_at, scope, period, slot, manual, sort, items) VALUES (?,?,\'todo\',?,?,?,?,?,?,?,?)'),
+  setTicks: db.prepare('UPDATE tasks SET ticks=?, updated_at=? WHERE id=? AND user_id=?'),
   task: db.prepare(`SELECT ${COLS} FROM tasks WHERE id = ? AND user_id = ?`),
   updateTask: db.prepare('UPDATE tasks SET title=?, status=?, updated_at=? WHERE id=? AND user_id=?'),
   delTask: db.prepare('DELETE FROM tasks WHERE id=? AND user_id=?'),
@@ -177,12 +182,14 @@ function periodOf(scope, date) {
 function ensurePeriod(uid, scope, date, period) {
   const dow = new Date(date + 'T00:00:00Z').getUTCDay();
   const now = Date.now();
+  const ids = MANUAL.templates.filter((t) => t.scope === scope).map((t) => `'${String(t.id).replace(/'/g, '')}'`);
+  db.exec(`DELETE FROM tasks WHERE user_id=${uid} AND scope='${scope}' AND period='${period}' AND tpl_id IS NOT NULL AND tpl_id NOT IN (${ids.join(',') || "''"})`);
   for (const t of MANUAL.templates) {
     if (t.scope !== scope) continue;
     if (scope === 'day') {
       if (t.dow ? !t.dow.includes(dow) : dow === 0) continue; // closed on Sundays unless the item names the weekday
     }
-    q.insertTpl.run(uid, t.title, now, now, scope, period, t.slot, t.time?.[0] ?? null, t.time?.[1] ?? null, t.id, t.manual, t.detail || null, t.sort ?? 5000, t.due ?? null);
+    q.insertTpl.run(uid, t.title, now, now, scope, period, t.slot, t.time?.[0] ?? null, t.time?.[1] ?? null, t.id, t.manual, t.detail || null, t.sort ?? 5000, t.due ?? null, t.items ? JSON.stringify(t.items) : null);
   }
 }
 
@@ -193,7 +200,7 @@ app.get('/api/tasks', authed, (c) => {
   if (!period) return c.json({ error: 'invalid' }, 400);
   const uid = c.get('user').id;
   ensurePeriod(uid, scope, date, period);
-  return c.json(q.tasks.all(uid, scope, period));
+  return c.json(q.tasks.all(uid, scope, period).map(shape));
 });
 
 app.post('/api/tasks', authed, async (c) => {
@@ -207,14 +214,16 @@ app.post('/api/tasks', authed, async (c) => {
   const now = Date.now();
   const out = titles.map((t, i) => {
     const r = q.insertTask.run(uid, t, 'todo', now + i, now, scope, period, 'メモ', 9000 + i);
-    return q.task.get(Number(r.lastInsertRowid), uid);
+    return shape(q.task.get(Number(r.lastInsertRowid), uid));
   });
   return c.json(out, 201);
 });
 
 // ---- manuals ----
-app.get('/api/manuals', authed, (c) =>
-  c.json(MANUAL.manuals.map((m) => ({ id: m.id, title: m.title, kind: m.kind, items: m.items.length }))));
+app.get('/api/manuals', authed, (c) => c.json({
+  cats: MANUAL.cats || [],
+  manuals: MANUAL.manuals.map((m) => ({ id: m.id, title: m.title, kind: m.kind, items: m.items.length })),
+}));
 
 app.get('/api/manuals/:id', authed, (c) => {
   const m = MANUAL.manuals.find((x) => x.id === c.req.param('id'));
@@ -230,11 +239,10 @@ app.post('/api/manuals/:id/add', authed, async (c) => {
   const uid = c.get('user').id;
   const now = Date.now();
   let added = 0;
-  m.items.forEach((it, i) => {
-    if (q.dupTask.get(uid, 'day', period, it.title, m.id)) return;
-    q.insertManualTask.run(uid, it.title, now, now, 'day', period, m.title, m.id, 7000 + i);
-    added++;
-  });
+  if (m.items.length && !q.dupTask.get(uid, 'day', period, m.id)) {
+    q.insertManualTask.run(uid, m.title, now, now, 'day', period, 'マニュアル', m.id, 7000, JSON.stringify(m.items.map((i) => ({ t: i.title, s: i.section, d: '' }))));
+    added = m.items.length;
+  }
   return c.json({ added });
 });
 
@@ -255,7 +263,8 @@ app.patch('/api/tasks/:id', authed, async (c) => {
   const title = body.title === undefined ? t.title : cleanTitle(body.title);
   if (!STATUSES.includes(status) || !title) return c.json({ error: 'invalid' }, 400);
   q.updateTask.run(title, status, Date.now(), t.id, uid);
-  return c.json(q.task.get(t.id, uid));
+  if (Array.isArray(body.ticks)) q.setTicks.run(JSON.stringify(body.ticks.filter(Number.isInteger).slice(0, 300)), Date.now(), t.id, uid);
+  return c.json(shape(q.task.get(t.id, uid)));
 });
 
 app.delete('/api/tasks/:id', authed, (c) => {
@@ -317,6 +326,69 @@ app.post('/api/ai/transcribe', authed, async (c) => {
   if (!res.ok) return c.json({ error: 'ai_failed' }, 502);
   const text = ((await res.json())?.result?.text || '').trim();
   return text ? c.json({ text }) : c.json({ error: 'ai_empty' }, 422);
+});
+
+
+// ---- ask the manuals (retrieval + Workers AI) ----
+const CHUNKS = [];
+for (const m of MANUAL.manuals) {
+  let buf = '';
+  const flush = () => { if (buf.trim()) CHUNKS.push({ id: m.id, title: m.title, text: buf.trim() }); buf = ''; };
+  for (const line of m.body.split('\n')) {
+    if (buf.length + line.length > 420) flush();
+    buf += line + '\n';
+  }
+  flush();
+}
+let EMB = null; // Float32Array[] aligned with CHUNKS
+const aiRun = async (model, payload) => {
+  const res = await fetch(`https://api.cloudflare.com/client/v4/accounts/${env.CF_ACCOUNT_ID}/ai/run/${model}`, {
+    method: 'POST', headers: { authorization: `Bearer ${env.CF_API_TOKEN}`, 'content-type': 'application/json' }, body: JSON.stringify(payload),
+  });
+  if (!res.ok) throw Object.assign(new Error('ai_failed'), { status: 502 });
+  return (await res.json()).result;
+};
+async function embed(texts) {
+  const out = [];
+  for (let i = 0; i < texts.length; i += 40) out.push(...(await aiRun('@cf/baai/bge-m3', { text: texts.slice(i, i + 40) })).data);
+  return out;
+}
+async function ensureEmbeddings() {
+  if (EMB) return EMB;
+  EMB = embed(CHUNKS.map((c) => `${c.title}\n${c.text}`)).then((v) => (EMB = v), (e) => { EMB = null; throw e; });
+  return EMB;
+}
+const cosine = (a, b) => { let d = 0, x = 0, y = 0; for (let i = 0; i < a.length; i++) { d += a[i] * b[i]; x += a[i] * a[i]; y += b[i] * b[i]; } return d / Math.sqrt(x * y || 1); };
+const bigrams = (s) => { const t = s.replace(/\s+/g, ''); const set = new Set(); for (let i = 0; i < t.length - 1; i++) set.add(t.slice(i, i + 2)); return set; };
+async function retrieve(question, k = 8) {
+  const keys = bigrams(question);
+  const kw = CHUNKS.map((c) => { const g = bigrams(c.title + c.text); let n = 0; for (const b of keys) if (g.has(b)) n++; return n / (keys.size || 1); });
+  let sem = null;
+  try { const [qv] = await embed([question]); const ev = await ensureEmbeddings(); sem = ev.map((v) => cosine(qv, v)); } catch {}
+  const tk = [...keys];
+  return CHUNKS.map((c, i) => {
+    const tg = bigrams(c.title); let tn = 0; for (const b of tk) if (tg.has(b)) tn++;
+    return { c, score: (sem ? sem[i] : 0) + kw[i] * 0.6 + (tn / (tk.length || 1)) * 0.4 };
+  }).sort((a, b) => b.score - a.score).slice(0, k);
+}
+const ASK_SYSTEM = 'あなたは介護デイサービスの新人スタッフを支える案内役です。次の【資料】だけを根拠に、質問に日本語で簡潔に答えてください。' +
+  '資料の順序・手順・数値は変えずにそのまま使います。手順は番号つきの短い箇条書きにします。資料に書かれていないことは推測せず「マニュアルに記載がありません。先輩か管理者に確認してください」と答えます。';
+
+app.post('/api/ask', authed, async (c) => {
+  const body = await c.req.json().catch(() => ({}));
+  const q = typeof body.q === 'string' ? body.q.trim().slice(0, 500) : '';
+  if (!q) return c.json({ error: 'empty' }, 400);
+  if (!env.CF_ACCOUNT_ID || !env.CF_API_TOKEN) return c.json({ error: 'ai_not_configured' }, 503);
+  try {
+    const top = await retrieve(q);
+    const context = top.map((t, i) => `【資料${i + 1}:${t.c.title}】\n${t.c.text}`).join('\n\n');
+    const r = await aiRun(AI_MODEL, { messages: [{ role: 'system', content: ASK_SYSTEM }, { role: 'user', content: `${context}\n\n【質問】${q}` }], max_tokens: 700 });
+    const answer = (r?.response ?? r?.choices?.[0]?.message?.content ?? '').trim();
+    if (!answer) return c.json({ error: 'ai_empty' }, 502);
+    const seen = new Set();
+    const sources = top.slice(0, 4).filter((t) => !seen.has(t.c.id) && seen.add(t.c.id)).map((t) => ({ id: t.c.id, title: t.c.title }));
+    return c.json({ answer, sources });
+  } catch (e) { return c.json({ error: e.message }, e.status || 500); }
 });
 
 app.get('/healthz', (c) => c.text('ok'));
