@@ -199,7 +199,7 @@ async function organize(text) {
   });
   if (!res.ok) throw Object.assign(new Error('ai_failed'), { status: 502 });
   const data = await res.json();
-  let r = data?.result?.response;
+  let r = data?.result?.response ?? data?.result?.choices?.[0]?.message?.content;
   if (typeof r === 'string') {
     const m = r.match(/\{[\s\S]*\}/);
     r = m ? JSON.parse(m[0]) : null;
