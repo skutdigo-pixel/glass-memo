@@ -307,3 +307,24 @@ a { color: inherit; text-decoration: none; }
 .chk-chip { padding: 5px 12px; border-radius: 12px; font-size: 12.5px; font-weight: 700; color: var(--green); background: rgba(47,199,122,.12); margin: 0 0 10px 8px; }
 .md-text .ls li.chk.gone { display: none; } .md-text.show-done .ls li.chk.gone { display: flex; }
 .det-i:has(.pad:empty) .pad { padding: 0; }
+
+/* ---- task titles with date chip ---- */
+.th { display: flex; align-items: flex-start; gap: 8px; }
+.card .t { font-size: 16px; font-weight: 700; line-height: 1.4; letter-spacing: -.01em; }
+.chip { flex: none; margin-top: 2px; padding: 2px 9px; border-radius: 10px; font-size: 12px; font-weight: 800; color: var(--blue); background: rgba(79,124,255,.13); white-space: nowrap; font-variant-numeric: tabular-nums; }
+.late .chip { color: var(--red); background: rgba(255,93,108,.14); }
+.det-t:empty { display: none; }
+.det-t { font-size: 13.5px; line-height: 1.65; }
+
+/* ---- manual sheets ---- */
+.blk { margin-bottom: 22px; scroll-margin-top: 12px; }
+.blk > h3 { margin: 6px 0 10px; }
+.arow { display: flex; gap: 10px; align-items: flex-start; padding: 11px 12px; border-radius: 16px; background: rgba(255,255,255,.75); box-shadow: 0 1px 0 rgba(255,255,255,.9) inset, 0 2px 8px rgba(60,80,140,.07); margin-bottom: 8px; }
+.arow .chip { min-width: 58px; text-align: center; color: var(--c, var(--blue)); background: color-mix(in srgb, var(--c, var(--blue)) 14%, transparent); }
+.at { font-weight: 700; font-size: 15px; line-height: 1.45; } .ad { margin-top: 3px; font-size: 13px; line-height: 1.6; color: var(--ink-2); word-break: break-word; }
+.hl { animation: hl 2.6s ease-out 1; border-radius: 14px; }
+@keyframes hl { 0%, 35% { background: rgba(255,214,102,.75); box-shadow: 0 0 0 6px rgba(255,214,102,.45); } 100% { background: transparent; box-shadow: 0 0 0 0 transparent; } }
+.arow.hl { animation-name: hlrow; }
+@keyframes hlrow { 0%, 35% { background: rgba(255,226,140,.95); box-shadow: 0 0 0 6px rgba(255,214,102,.5); } 100% { background: rgba(255,255,255,.75); box-shadow: 0 1px 0 rgba(255,255,255,.9) inset, 0 2px 8px rgba(60,80,140,.07); } }
+.blocks ul.ls.show-done li.chk.gone { display: flex; } .blocks li.chk.gone { display: none; }
+.card { touch-action: pan-y; -webkit-touch-callout: none; }

@@ -371,12 +371,14 @@ async function tickItem(row, task, idx, li) {
 }
 
 function makeRow(task) {
+  const cur = () => state.tasks.find((t) => String(t.id) === row.dataset.id) || task;
   const row = h(`<div class="row" data-id="${task.id}" data-testid="task">
     <div class="reveal r"></div><div class="reveal l"></div>
-    <div class="card glass"><span class="st"></span><div class="t"></div><div class="sub"></div>
+    <div class="card glass"><span class="st"></span><div class="th"><span class="chip" hidden></span><div class="t"></div></div><div class="sub"></div>
       <div class="det"><div class="det-i"><div class="pad"></div><div class="det-t"></div><button class="man" hidden></button></div></div></div>
   </div>`);
   row.querySelector('.t').textContent = task.title;
+  if (task.chip) { const c = row.querySelector('.chip'); c.hidden = false; c.textContent = task.chip; }
   const hasDetail = !!(task.detail || task.manual || task.items);
   if (hasDetail) {
     row.querySelector('.det-t').textContent = task.detail || '';
@@ -384,7 +386,7 @@ function makeRow(task) {
     if (task.manual) {
       const b = row.querySelector('.man');
       b.hidden = false; b.dataset.manual = task.manual; b.textContent = 'マニュアル';
-      b.onclick = (e) => { e.stopPropagation(); loadManuals().then(() => openManual(task.manual)); };
+      b.onclick = (e) => { e.stopPropagation(); loadManuals().then(() => openManual(task.manual, cur().anchor)); };
     }
   }
   attachSwipe(row, task);
@@ -496,35 +498,47 @@ function targets(task) {
 function attachSwipe(row, task) {
   const card = row.querySelector('.card');
   const rv = { right: row.querySelector('.reveal.r'), left: row.querySelector('.reveal.l') };
-  let sx = 0, sy = 0, dx = 0, id = null, locked = false, lastX = 0, lastT = 0, v = 0, busy = false, moved = false, downEl = null;
+  let sx = 0, sy = 0, dx = 0, id = null, locked = false, busy = false, moved = false, downEl = null, hot = false;
+  let samples = [];
   const cur = () => state.tasks.find((t) => String(t.id) === row.dataset.id) || task;
+  const limit = () => Math.min(72, row.offsetWidth * 0.2);
 
   const paint = () => {
     const T = targets(cur());
     const side = dx > 0 ? 'right' : 'left';
     rv[side === 'right' ? 'left' : 'right'].style.opacity = 0;
     const cfg = T[side], el = rv[side];
-    if (!cfg) { el.style.opacity = 0; return; }
     if (el.dataset.k !== cfg.color) { el.dataset.k = cfg.color; el.style.background = cfg.color; el.innerHTML = cfg.icon; }
-    el.style.opacity = Math.min(1, Math.abs(dx) / (THRESHOLD * 0.8));
-    el.classList.toggle('hot', Math.abs(dx) >= THRESHOLD);
+    el.style.opacity = Math.min(1, Math.abs(dx) / (limit() * 0.8));
+    const nowHot = Math.abs(dx) >= limit();
+    if (nowHot !== hot) { hot = nowHot; if (hot) navigator.vibrate?.(8); }
+    el.classList.toggle('hot', nowHot);
+  };
+  const velocity = () => {
+    if (samples.length < 2) return 0;
+    const a = samples[0], b = samples[samples.length - 1];
+    return (b.x - a.x) / Math.max(1, b.t - a.t);
   };
 
+  card.addEventListener('contextmenu', (e) => e.preventDefault());
+  card.addEventListener('dragstart', (e) => e.preventDefault());
   card.addEventListener('pointerdown', (e) => {
     if (busy || id !== null || e.target.closest('.man, .pc, .pad-more') || (e.pointerType === 'mouse' && e.button !== 0)) return;
-    downEl = e.target; id = e.pointerId; sx = lastX = e.clientX; sy = e.clientY; dx = 0; locked = false; moved = false; lastT = performance.now(); v = 0;
+    downEl = e.target; id = e.pointerId; sx = e.clientX; sy = e.clientY; dx = 0; locked = false; moved = false; hot = false;
+    samples = [{ x: e.clientX, t: performance.now() }];
   });
   card.addEventListener('pointermove', (e) => {
     if (e.pointerId !== id) return;
     const mx = e.clientX - sx, my = e.clientY - sy;
     if (Math.abs(mx) > 6 || Math.abs(my) > 6) moved = true;
     if (!locked) {
-      if (Math.abs(mx) > 8 && Math.abs(mx) > Math.abs(my)) { locked = true; card.setPointerCapture(id); card.classList.add('drag'); } else return;
+      if (Math.abs(mx) > 7 && Math.abs(mx) > Math.abs(my) * 0.8) { locked = true; try { card.setPointerCapture(id); } catch {} card.classList.add('drag'); } else return;
     }
     const now = performance.now();
-    v = (e.clientX - lastX) / Math.max(1, now - lastT); lastX = e.clientX; lastT = now;
-    dx = targets(cur())[mx > 0 ? 'right' : 'left'] ? mx : mx * 0.25;
-    card.style.transform = `translateX(${dx}px) rotate(${dx / 70}deg)`;
+    samples.push({ x: e.clientX, t: now });
+    while (samples.length > 2 && now - samples[0].t > 120) samples.shift();
+    dx = mx;
+    card.style.transform = `translateX(${dx}px) rotate(${dx / 90}deg)`;
     paint();
   });
   const end = (e) => {
@@ -538,8 +552,10 @@ function attachSwipe(row, task) {
     card.classList.remove('drag');
     const side = dx > 0 ? 'right' : 'left';
     const cfg = targets(cur())[side];
-    const fast = Math.abs(v) > 0.6 && Math.abs(dx) > 40 && Math.sign(v) === Math.sign(dx);
-    if (e.type === 'pointerup' && cfg && (Math.abs(dx) >= THRESHOLD || fast)) commit(side, cfg);
+    const v = velocity();
+    const flick = Math.abs(v) > 0.3 && Math.abs(dx) > 24 && Math.sign(v) === Math.sign(dx);
+    // a cancelled gesture (browser took over) is still judged by how far it travelled, so it never just snaps back
+    if (Math.abs(dx) >= limit() || flick) commit(side, cfg);
     else { dx = 0; card.style.transform = ''; rv.left.style.opacity = rv.right.style.opacity = 0; }
   };
   card.addEventListener('pointerup', end);
@@ -551,10 +567,10 @@ function attachSwipe(row, task) {
     const t = cur();
     const dir = side === 'right' ? 1 : -1;
     rv[side].style.opacity = 1; rv[side].classList.add('hot');
-    card.style.transition = 'transform .26s cubic-bezier(.5,0,.75,0), opacity .26s';
+    card.style.transition = 'transform .24s cubic-bezier(.5,0,.75,0), opacity .24s';
     card.style.transform = `translateX(${dir * (row.offsetWidth + 40)}px) rotate(${dir * 8}deg)`;
     card.style.opacity = 0;
-    await sleep(230);
+    await sleep(220);
     if (cfg.kind === 'delete') {
       const h0 = row.offsetHeight;
       row.animate([{ height: h0 + 'px', opacity: 1 }, { height: '0px', opacity: 0 }], { duration: 300, easing: 'cubic-bezier(.22,1,.36,1)', fill: 'forwards' });
@@ -653,7 +669,7 @@ function renderBody(text, mid, onTick) {
     table = null;
     let m;
     if ((m = l.match(/^##\s+(.+)/))) { closeAll(); out.append(h(`<h3>${esc(m[1])}</h3>`)); continue; }
-    if (/^(【.+】|[■●⏰▼]\s?|第\d+章|[ⅠⅡⅢⅣ]、|\d+[.．]\s*[■•]?\s*\S)/.test(l) && l.length < 48 && !/^[①-⑩]/.test(l)) { closeAll(); out.append(h(`<h4>${esc(l.replace(/^[■●▼]\s?/, ''))}</h4>`)); continue; }
+    if (/^(【.+】|[■●⏰▼]\s?|第\d+章|[ⅠⅡⅢⅣ]、|\d+[.．]\s*[■•]?\s*\S)/.test(l) && l.length < 48 && !/^[①-⑩]/.test(l)) { closeAll(); const hd = h(`<h4>${esc(l.replace(/^[■●▼]\s?/, ''))}</h4>`); const am = l.match(/^【(.+?)】/); hd.dataset.anchor = am ? am[1] : l; out.append(hd); continue; }
     if (!list) { list = h('<ul class="ls"></ul>'); out.append(list); }
     if ((m = l.match(/^[□☐◻]︎?\s*(.*)/))) {
       const key = 'c' + ci++;
@@ -667,6 +683,68 @@ function renderBody(text, mid, onTick) {
     list.append(h(`<li class="pl"><span>${esc(l)}</span></li>`));
   }
   return out;
+}
+
+/* structured sheets (e.g. 管理者業務指導項目): checkboxes, dated rows, groups */
+function chkItem(text, on, onToggle) {
+  const li = h(`<li class="chk${on ? ' on gone' : ''}"><i>${ICON.check}</i><span>${esc(text)}</span></li>`);
+  li.onclick = () => { const now = !li.classList.contains('on'); li.classList.toggle('on', now); li.classList.toggle('gone', now); onToggle(now); };
+  return li;
+}
+function renderBlocks(m, mid) {
+  const root = h('<div class="md-text blocks"></div>');
+  const today = clock().date;
+  const local = (k) => { try { return JSON.parse(localStorage.getItem(`chk-${mid}-${k}-${today}`) || '{}'); } catch { return {}; } };
+  const saveLocal = (k, o) => { try { localStorage.setItem(`chk-${mid}-${k}-${today}`, JSON.stringify(o)); } catch {} };
+  for (const b of m.blocks) {
+    const sec = h(`<section class="blk" ${b.anchor ? `data-anchor="${esc(b.anchor)}"` : ''}><h3>${esc(b.title)}</h3></section>`);
+    if (b.type === 'daily') {
+      const ul = h('<ul class="ls"></ul>');
+      let task = null; let ticks = new Set();
+      const o = local('daily');
+      const paintList = () => {
+        ul.replaceChildren();
+        b.items.forEach((t, i) => {
+          const on = task ? ticks.has(i) : !!o[i];
+          ul.append(chkItem(t, on, async (now) => {
+            if (task) {
+              now ? ticks.add(i) : ticks.delete(i);
+              task.ticks = [...ticks].sort((x, y) => x - y);
+              const next = task.ticks.length === task.items.length ? 'done' : task.ticks.length ? 'doing' : 'todo';
+              const body = { ticks: task.ticks }; if (next !== task.status) { task.status = next; body.status = next; }
+              const mine = state.tasks.find((x) => x.id === task.id); if (mine) Object.assign(mine, { ticks: task.ticks, status: task.status });
+              try { await api(`/api/tasks/${task.id}`, 'PATCH', body); } catch {}
+            } else { o[i] = now; saveLocal('daily', o); }
+            sec.querySelector('.chk-chip').textContent = `済 ${ul.querySelectorAll('.chk.on').length}`;
+          }));
+        });
+        const n = ul.querySelectorAll('.chk.on').length;
+        const chip = sec.querySelector('.chk-chip'); chip.hidden = !n; chip.textContent = ul.classList.contains('show-done') ? '済を隠す' : `済 ${n}`;
+      };
+      const chip = h('<button class="chk-chip" hidden></button>');
+      chip.onclick = () => { ul.classList.toggle('show-done'); chip.textContent = ul.classList.contains('show-done') ? '済を隠す' : `済 ${ul.querySelectorAll('.chk.on').length}`; };
+      sec.append(chip, ul); paintList();
+      api(`/api/tasks?scope=day&date=${today}`).then((list) => { task = list.find((x) => x.manual === 'admin' && x.items); if (task) { ticks = new Set(task.ticks); paintList(); } }).catch(() => {});
+    } else if (b.type === 'rows') {
+      for (const r of b.rows) {
+        const row = h(`<div class="arow" data-anchor="${esc(r.anchor)}"><span class="chip">${esc(r.chip)}</span><div><div class="at">${esc(r.title)}</div>${r.text && r.text !== r.title ? `<div class="ad">${esc(r.text)}</div>` : ''}</div></div>`);
+        sec.append(row);
+      }
+    } else if (b.type === 'groups') {
+      for (const g of b.groups) {
+        sec.append(h(`<h4>${esc(g.name)}</h4>`));
+        const o = local('g-' + g.name); const ul = h('<ul class="ls"></ul>');
+        g.items.forEach((t, i) => ul.append(chkItem(t, !!o[i], (now) => { o[i] = now; saveLocal('g-' + g.name, o); })));
+        sec.append(ul);
+      }
+    } else if (b.type === 'levels') {
+      const t = h('<div class="tbl"></div>');
+      b.rows.forEach((r) => { const row = h('<div class="tr"></div>'); r.forEach((c) => row.append(h(`<div class="td">${esc(c)}</div>`))); row.style.setProperty('--n', r.length); t.append(row); });
+      sec.append(t);
+    }
+    root.append(sec);
+  }
+  return root;
 }
 
 function renderVisual(v) {
@@ -684,7 +762,7 @@ function renderVisual(v) {
   return el;
 }
 
-async function openManual(id) {
+async function openManual(id, anchor) {
   let m;
   try { m = await api(`/api/manuals/${id}`); } catch { return; }
   document.querySelector('.manual-doc.md')?.remove();
@@ -703,7 +781,7 @@ async function openManual(id) {
   if (m.body) {
     const seg = h('<div class="seg" data-testid="seg"><i></i><button data-v="rich" aria-pressed="true">整形</button><button data-v="raw" aria-pressed="false">原文</button></div>');
     const chip = h('<button class="chk-chip" hidden></button>');
-    const rich = renderBody(m.body, id, (n) => { chip.hidden = !n; chip.textContent = rich.classList.contains('show-done') ? '済を隠す' : `済 ${n}`; });
+    const rich = m.blocks ? renderBlocks(m, id) : renderBody(m.body, id, (n) => { chip.hidden = !n; chip.textContent = rich.classList.contains('show-done') ? '済を隠す' : `済 ${n}`; });
     const raw = h(`<pre class="md-raw" hidden>${esc(m.body)}</pre>`);
     seg.querySelectorAll('button').forEach((b) => (b.onclick = () => {
       seg.dataset.v = b.dataset.v;
@@ -716,6 +794,12 @@ async function openManual(id) {
   }
   closeable(doc);
   $app.append(doc);
+  if (anchor) setTimeout(() => {
+    const t = [...doc.querySelectorAll('[data-anchor]')].find((e) => e.dataset.anchor === anchor) || [...doc.querySelectorAll('h4, h3')].find((e) => e.textContent.includes(anchor));
+    if (!t) return;
+    t.scrollIntoView({ block: 'center', behavior: 'smooth' });
+    t.classList.add('hl');
+  }, 650);
 }
 
 /* ---------------- ask the manuals ---------------- */
