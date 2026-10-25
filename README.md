@@ -47,3 +47,6 @@ fly secrets set GOOGLE_CLIENT_ID=... GOOGLE_CLIENT_SECRET=... BASE_URL=https://<
 fly deploy
 ```
 SQLite のためマシンは 1 台で運用してください。
+
+## ワンコマンドデプロイ
+`.env` に値を入れ(git 管理外)、`fly auth login` 後に `scripts/deploy.sh <app名>` を実行すると、アプリ作成、Volume 作成、secrets 登録、デプロイまで行います。
