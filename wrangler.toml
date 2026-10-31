@@ -13,8 +13,8 @@ binding = "AI"
 [[d1_databases]]
 binding = "DB"
 database_name = "glass-memo"
-database_id = "REPLACE_WITH_D1_ID"
+database_id = "ad330c8b-ecad-43a8-9fc7-cd7639047f12"
 
 [[kv_namespaces]]
 binding = "MEDIA"
-id = "REPLACE_WITH_KV_ID"
+id = "44893fcf7e6d41ebb78711681ada5ccb"
