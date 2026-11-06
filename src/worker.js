@@ -212,13 +212,30 @@ app.delete('/api/tasks/:id', authed, async (c) => {
 });
 
 // ---- manuals ----
-app.get('/api/manuals', authed, (c) => c.json({
-  cats: MANUAL.cats || [],
-  manuals: MANUAL.manuals.map((m) => ({ id: m.id, title: m.title, kind: m.kind, items: m.items.length })),
-}));
+async function voiceDocs(db) {
+  const { results } = await db.prepare("SELECT id, title, manual AS cat, text FROM additions WHERE kind='doc' ORDER BY id").all();
+  return results;
+}
+
+app.get('/api/manuals', authed, async (c) => {
+  const docs = await voiceDocs(c.env.DB);
+  const cats = (MANUAL.cats || []).map((k) => ({ ...k, ids: [...k.ids, ...docs.filter((d) => d.cat === k.id).map((d) => 'doc-' + d.id)] }));
+  return c.json({
+    cats,
+    manuals: [
+      ...MANUAL.manuals.map((m) => ({ id: m.id, title: m.title, kind: m.kind, items: m.items.length })),
+      ...docs.map((d) => ({ id: 'doc-' + d.id, title: d.title, kind: '音声記録', items: 0 })),
+    ],
+  });
+});
 
 app.get('/api/manuals/:id', authed, async (c) => {
-  const m = MANUAL.manuals.find((x) => x.id === c.req.param('id'));
+  const id = c.req.param('id');
+  if (id.startsWith('doc-')) {
+    const d = await c.env.DB.prepare("SELECT id, title, text FROM additions WHERE kind='doc' AND id=?").bind(Number(id.slice(4))).first();
+    return d ? c.json({ id, title: d.title, kind: '音声記録', body: d.text, media: [], items: [], notes: [] }) : c.json({ error: 'not_found' }, 404);
+  }
+  const m = MANUAL.manuals.find((x) => x.id === id);
   if (!m) return c.json({ error: 'not_found' }, 404);
   const { results } = await c.env.DB.prepare("SELECT id, target, text, created_at FROM additions WHERE kind='note' AND manual=? ORDER BY id").bind(m.id).all();
   return c.json({ ...m, notes: results });
@@ -349,12 +366,25 @@ app.post('/api/ask', authed, async (c) => {
   if (!q) return c.json({ error: 'empty' }, 400);
   try {
     const top = await retrieve(c, q);
+    const { results: extra } = await c.env.DB.prepare("SELECT id, kind, manual, title, text FROM additions WHERE kind IN ('doc','note')").all();
+    const qk = bigrams(q);
+    const extraHits = [];
+    for (const e of extra) {
+      const parts = e.kind === 'doc' ? e.text.split(/\n+/).reduce((a, l) => { const t = a[a.length - 1]; if (t && t.length + l.length < 420) a[a.length - 1] += l + '\n'; else a.push(l + '\n'); return a; }, []) : [e.text];
+      for (const p of parts) {
+        const g = bigrams(p); let n = 0; for (const b of qk) if (g.has(b)) n++;
+        const sc = n / (qk.size || 1);
+        if (sc >= 0.3) extraHits.push({ c: { id: e.kind === 'doc' ? 'doc-' + e.id : e.manual, title: e.kind === 'doc' ? e.title : '追記', text: p.trim() }, score: sc });
+      }
+    }
+    extraHits.sort((a, b) => b.score - a.score);
+    top.push(...extraHits.slice(0, 3));
     const context = top.map((t, i) => `【資料${i + 1}:${t.c.title}】\n${t.c.text}`).join('\n\n');
     const r = await ai(c, AI_MODEL, { messages: [{ role: 'system', content: ASK_SYSTEM }, { role: 'user', content: `${context}\n\n【質問】${q}` }], max_tokens: 700 });
     const answer = (r?.response ?? r?.choices?.[0]?.message?.content ?? '').trim();
     if (!answer) return c.json({ error: 'ai_empty' }, 502);
     const seen = new Set();
-    const sources = top.slice(0, 4).filter((t) => !seen.has(t.c.id) && seen.add(t.c.id)).map((t) => ({ id: t.c.id, title: t.c.title }));
+    const sources = [...top.slice(0, 3), ...top.slice(8)].filter((t) => !seen.has(t.c.id) && seen.add(t.c.id)).map((t) => ({ id: t.c.id, title: t.c.title }));
     return c.json({ answer, sources });
   } catch (e) { return c.json({ error: e.message }, e.status || 500); }
 });
