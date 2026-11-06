@@ -112,7 +112,7 @@ function showMain() {
       <button type="button" class="clip glass" data-testid="attach" aria-label="audio file">${ICON.clip}</button>
     </div>`), h(`
     <form class="composer glass" autocomplete="off">
-      <input type="file" accept="audio/*,video/mp4" hidden data-testid="file">
+      <input type="file" accept="audio/*,.m4a,.mp3,.wav,.aac,.caf,.qta,.mp4,video/mp4" hidden data-testid="file">
       <textarea rows="1" data-testid="input" enterkeyhint="send" aria-label="memo" autocapitalize="off" autofocus></textarea>
       <button type="button" class="ib ai" data-testid="ai" aria-label="AI" hidden>${ICON.spark}</button>
       <button type="submit" class="ib go" data-testid="add" aria-label="add" hidden>${ICON.send}</button>
@@ -494,17 +494,21 @@ async function toggleRecord() {
   const timer = setInterval(() => { if (Date.now() - t0 > 120000) mr.stop(); }, 1000);
 }
 
+const toBase64 = (blob) => new Promise((res, rej) => { const r = new FileReader(); r.onload = () => res(String(r.result).split(',')[1] || ''); r.onerror = rej; r.readAsDataURL(blob); });
+
 async function transcribeAndAdd(blob, type) {
   const btn = $app.querySelector('.voice');
   btn.classList.add('busy'); $composer.classList.add('working');
   try {
-    const { text } = await api('/api/ai/transcribe', 'POST', null, { data: blob, type: type.split(';')[0] });
+    const { text } = await api('/api/ai/transcribe', 'POST', { audio: await toBase64(blob) });
     if (state.mode === 'ask') { await askQ(text); return; }
     if (state.mode === 'import') { await importText(text); return; }
     let tasks;
     try { tasks = await organize(text); } catch { tasks = [text]; }
     await addTitles(tasks);
-  } catch (e) { if (e.message !== 'unauthorized') toast('Voice Error'); }
+  } catch (e) {
+    if (e.message !== 'unauthorized') toast(e.status === 413 ? 'ファイルが大きすぎます' : e.status === 422 || e.status === 502 ? '音声を読み取れませんでした' : 'Voice Error');
+  }
   finally { btn.classList.remove('busy'); $composer.classList.remove('working'); $input.focus(); }
 }
 

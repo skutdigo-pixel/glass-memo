@@ -288,13 +288,14 @@ app.post('/api/ai/organize', authed, async (c) => {
   try { return c.json({ tasks: await organize(c, text) }); } catch (e) { return c.json({ error: e.message }, e.status || 500); }
 });
 
+// audio arrives base64-encoded by the browser: the free plan allows ~10 ms of CPU per request, so the Worker must not re-encode it
 app.post('/api/ai/transcribe', authed, async (c) => {
-  const buf = new Uint8Array(await c.req.arrayBuffer());
-  if (!buf.length || buf.length > 8 * 1024 * 1024) return c.json({ error: 'invalid' }, 400);
-  let bin = '';
-  for (let i = 0; i < buf.length; i += 0x8000) bin += String.fromCharCode(...buf.subarray(i, i + 0x8000));
+  const body = await c.req.json().catch(() => ({}));
+  const audio = typeof body.audio === 'string' ? body.audio : '';
+  if (!audio) return c.json({ error: 'invalid' }, 400);
+  if (audio.length > 14e6) return c.json({ error: 'too_large' }, 413);
   try {
-    const res = await ai(c, '@cf/openai/whisper-large-v3-turbo', { audio: btoa(bin), language: 'ja' });
+    const res = await ai(c, '@cf/openai/whisper-large-v3-turbo', { audio, language: 'ja' });
     const text = (res?.text || '').trim();
     return text ? c.json({ text }) : c.json({ error: 'ai_empty' }, 422);
   } catch { return c.json({ error: 'ai_failed' }, 502); }
