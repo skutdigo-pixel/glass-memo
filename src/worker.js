@@ -141,7 +141,11 @@ function periodOf(scope, date) {
 async function ensurePeriod(db, uid, scope, date, period) {
   const dow = new Date(date + 'T00:00:00Z').getUTCDay();
   const now = Date.now();
-  const tpls = MANUAL.templates.filter((t) => t.scope === scope);
+  const { results: extra } = await db.prepare("SELECT * FROM additions WHERE kind='task' AND scope=?").bind(scope).all();
+  const tpls = [
+    ...MANUAL.templates.filter((t) => t.scope === scope),
+    ...extra.map((a) => ({ id: 'x' + a.id, scope, slot: scope === 'month' ? '' : 'メモ', title: a.title, detail: a.text, manual: a.manual, due: a.due, sort: scope === 'month' ? (a.due || 31) * 100 + 99 : 8000 })),
+  ];
   const marks = tpls.map(() => '?').join(',') || "''";
   const stmts = [db.prepare(`DELETE FROM tasks WHERE user_id=? AND scope=? AND period=? AND tpl_id IS NOT NULL AND tpl_id NOT IN (${marks})`).bind(uid, scope, period, ...tpls.map((t) => t.id))];
   const up = db.prepare(`INSERT INTO tasks (user_id, title, status, created_at, updated_at, scope, period, slot, t_start, t_end, tpl_id, manual, detail, sort, due, items)
@@ -166,7 +170,8 @@ app.get('/api/tasks', authed, async (c) => {
   const uid = c.get('user').id;
   await ensurePeriod(c.env.DB, uid, scope, date, period);
   const { results } = await c.env.DB.prepare(`SELECT ${COLS} FROM tasks WHERE user_id = ? AND scope = ? AND period = ? ORDER BY sort, id`).bind(uid, scope, period).all();
-  return c.json(results.map(shape));
+  const { results: notes } = await c.env.DB.prepare("SELECT id, target, text FROM additions WHERE kind='note' AND target IS NOT NULL").all();
+  return c.json(results.map((r) => ({ ...shape(r), notes: notes.filter((n) => n.target === r.tpl_id).map((n) => ({ id: n.id, text: n.text })) })));
 });
 
 app.post('/api/tasks', authed, async (c) => {
@@ -212,9 +217,11 @@ app.get('/api/manuals', authed, (c) => c.json({
   manuals: MANUAL.manuals.map((m) => ({ id: m.id, title: m.title, kind: m.kind, items: m.items.length })),
 }));
 
-app.get('/api/manuals/:id', authed, (c) => {
+app.get('/api/manuals/:id', authed, async (c) => {
   const m = MANUAL.manuals.find((x) => x.id === c.req.param('id'));
-  return m ? c.json(m) : c.json({ error: 'not_found' }, 404);
+  if (!m) return c.json({ error: 'not_found' }, 404);
+  const { results } = await c.env.DB.prepare("SELECT id, target, text, created_at FROM additions WHERE kind='note' AND manual=? ORDER BY id").bind(m.id).all();
+  return c.json({ ...m, notes: results });
 });
 
 app.post('/api/manuals/:id/add', authed, async (c) => {
@@ -248,13 +255,24 @@ app.get('/media/:file', async (c) => {
 // ---- AI (Workers AI binding) ----
 const SYSTEM = 'あなたはタスク整理アシスタントです。ユーザーのメモを、実行可能な短いタスクに分解してください。' +
   '各タスクは30文字以内の簡潔な日本語(元の言語を維持)。JSONのみを返す: {"tasks":["...","..."]}。説明文は一切出力しない。';
+// Workers AI: the binding in production; REST with a token in local dev (the binding is not available in `wrangler dev --local`)
+async function ai(c, model, input) {
+  if (c.env.CF_API_TOKEN && c.env.CF_ACCOUNT_ID) {
+    const res = await fetch(`https://api.cloudflare.com/client/v4/accounts/${c.env.CF_ACCOUNT_ID}/ai/run/${model}`, {
+      method: 'POST', headers: { authorization: `Bearer ${c.env.CF_API_TOKEN}`, 'content-type': 'application/json' }, body: JSON.stringify(input),
+    });
+    if (!res.ok) throw new Error('ai_http_' + res.status);
+    return (await res.json()).result;
+  }
+  return c.env.AI.run(model, input);
+}
 const aiErr = (m, status = 502) => Object.assign(new Error(m), { status });
 
 async function organize(c, text) {
   if (c.env.AI_MOCK === '1') return text.split(/[\n、,。;；]|と(?=[^\s])|そして/).map((s) => s.trim()).filter(Boolean).slice(0, 10);
   let res;
   try {
-    res = await c.env.AI.run(AI_MODEL, { messages: [{ role: 'system', content: SYSTEM }, { role: 'user', content: text }], response_format: { type: 'json_object' }, max_tokens: 512 });
+    res = await ai(c, AI_MODEL, { messages: [{ role: 'system', content: SYSTEM }, { role: 'user', content: text }], response_format: { type: 'json_object' }, max_tokens: 512 });
   } catch { throw aiErr('ai_failed'); }
   let r = res?.response ?? res?.choices?.[0]?.message?.content;
   if (typeof r === 'string') { const m = r.match(/\{[\s\S]*\}/); try { r = m ? JSON.parse(m[0]) : null; } catch { r = null; } }
@@ -276,7 +294,7 @@ app.post('/api/ai/transcribe', authed, async (c) => {
   let bin = '';
   for (let i = 0; i < buf.length; i += 0x8000) bin += String.fromCharCode(...buf.subarray(i, i + 0x8000));
   try {
-    const res = await c.env.AI.run('@cf/openai/whisper-large-v3-turbo', { audio: btoa(bin), language: 'ja' });
+    const res = await ai(c, '@cf/openai/whisper-large-v3-turbo', { audio: btoa(bin), language: 'ja' });
     const text = (res?.text || '').trim();
     return text ? c.json({ text }) : c.json({ error: 'ai_empty' }, 422);
   } catch { return c.json({ error: 'ai_failed' }, 502); }
@@ -296,7 +314,7 @@ for (const m of MANUAL.manuals) {
 let EMB = null;
 async function embed(c, texts) {
   const out = [];
-  for (let i = 0; i < texts.length; i += 40) out.push(...(await c.env.AI.run('@cf/baai/bge-m3', { text: texts.slice(i, i + 40) })).data);
+  for (let i = 0; i < texts.length; i += 40) out.push(...(await ai(c, '@cf/baai/bge-m3', { text: texts.slice(i, i + 40) })).data);
   return out;
 }
 async function ensureEmbeddings(c) {
@@ -331,13 +349,136 @@ app.post('/api/ask', authed, async (c) => {
   try {
     const top = await retrieve(c, q);
     const context = top.map((t, i) => `【資料${i + 1}:${t.c.title}】\n${t.c.text}`).join('\n\n');
-    const r = await c.env.AI.run(AI_MODEL, { messages: [{ role: 'system', content: ASK_SYSTEM }, { role: 'user', content: `${context}\n\n【質問】${q}` }], max_tokens: 700 });
+    const r = await ai(c, AI_MODEL, { messages: [{ role: 'system', content: ASK_SYSTEM }, { role: 'user', content: `${context}\n\n【質問】${q}` }], max_tokens: 700 });
     const answer = (r?.response ?? r?.choices?.[0]?.message?.content ?? '').trim();
     if (!answer) return c.json({ error: 'ai_empty' }, 502);
     const seen = new Set();
     const sources = top.slice(0, 4).filter((t) => !seen.has(t.c.id) && seen.add(t.c.id)).map((t) => ({ id: t.c.id, title: t.c.title }));
     return c.json({ answer, sources });
   } catch (e) { return c.json({ error: e.message }, e.status || 500); }
+});
+
+// ---- import: voice/text -> proposed additions to manuals & the task flow ----
+function catalog() {
+  const manuals = MANUAL.manuals.map((m) => `${m.id}=${m.title}`).join(' / ');
+  const fixed = MANUAL.templates.filter((t) => t.scope !== 'day').map((t) => `${t.id}|${t.scope === 'month' ? (t.due || '') + '日' : '週'}|${t.title}`).join('\n');
+  const slots = MANUAL.templates.filter((t) => t.scope === 'day').map((t) => `${t.id}|${t.slot}`).join('\n');
+  return { manuals, fixed, slots };
+}
+const IMPORT_SYSTEM = (cat) => `あなたは介護デイサービスのマニュアル編集アシスタントです。話された内容(音声の書き起こし)を、既存のマニュアルと業務フローの正しい場所に振り分けます。
+JSONだけを返します: {"summary":"一文の要約","items":[{"type":"task か note","scope":"month か week か day","due":月内の日付の数字かnull,"title":"20文字以内の短い名前","text":"話された内容に忠実な説明(元の言い回しを活かす)","manual":"マニュアルID","target":"既存タスクIDかnull"}]}
+規則:
+- 既存のタスクの補足・注意点・やり方なら type=note、target にそのタスクIDを入れ、manual もそのタスクのマニュアルIDにする。
+- 既存にない新しい作業(いつまでに何をする)なら type=task。scope と due を入れる(月末作業なら scope=month, due=25〜31)。
+- 作業のやり方や知識で、特定のタスクに結びつかないなら type=note、target=null、manual に最も近いマニュアルIDを入れる。
+- 話にない内容は作らない。1つの話題につき1項目。最大8項目。
+【マニュアルID】${cat.manuals}
+【既存の月・週タスク(ID|時期|名前)】
+${cat.fixed}
+【1日の枠(ID|名前)】
+${cat.slots}`;
+
+const bgSet = (str) => { const t = String(str).replace(/[\s　、。,.()（）「」]/g, ''); const set = new Set(); for (let i = 0; i < t.length - 1; i++) set.add(t.slice(i, i + 2)); return set; };
+const dueFromText = (txt) => {
+  const m = String(txt).match(/(\d{1,2})日/);
+  if (m && +m[1] >= 1 && +m[1] <= 31) return +m[1];
+  if (/最終|月末|月の終わり/.test(txt)) return 31;
+  if (/月初|月始|はじめ/.test(txt)) return 1;
+  return null;
+};
+// best existing task whose title/detail the spoken text mostly repeats
+function bestTemplate(text, scope) {
+  const A = bgSet(text);
+  let best = null;
+  for (const t of MANUAL.templates) {
+    if (scope && t.scope !== scope) continue;
+    if (t.scope === 'day' && t.items) continue;
+    const B = bgSet(t.title + (t.detail || '').slice(0, 24));
+    let n = 0; for (const g of B) if (A.has(g)) n++;
+    const score = n / (B.size || 1);
+    if (!best || score > best.score) best = { t, score };
+  }
+  return best && best.score >= 0.5 ? best.t : null;
+}
+
+function bestManual(text) {
+  const A = bgSet(text);
+  let best = null;
+  for (const m of MANUAL.manuals) {
+    if (!m.body) continue;
+    const B = bgSet(m.title + m.body.slice(0, 3000));
+    let n = 0; for (const g of A) if (B.has(g)) n++;
+    const score = n / (A.size || 1);
+    if (!best || score > best.score) best = { m, score };
+  }
+  return best && best.score >= 0.35 ? best.m.id : null;
+}
+
+function normalizeItems(raw) {
+  const mids = new Set(MANUAL.manuals.map((m) => m.id));
+  const tids = new Map(MANUAL.templates.map((t) => [t.id, t]));
+  const out = [];
+  for (const it of Array.isArray(raw) ? raw : []) {
+    const text = cleanTitle(it?.text);
+    if (!text) continue;
+    let target = tids.has(it.target) ? it.target : null;
+    let type = it.type === 'task' ? 'task' : 'note';
+    if (type === 'task' && !target) {
+      const same = bestTemplate(`${it.title || ''} ${text}`, ['month', 'week', 'day'].includes(it.scope) ? it.scope : null);
+      if (same) { target = same.id; type = 'note'; }   // already exists: attach the new wording to it instead of duplicating
+    }
+    if (type === 'note' && !target) { const same = bestTemplate(`${it.title || ''} ${text}`, null); if (same) target = same.id; }
+    const manual = target ? tids.get(target).manual : type === 'task' ? (it.scope === 'day' ? (bestManual(text) || 'schedule') : 'admin') : (bestManual(text) || (mids.has(it.manual) ? it.manual : 'admin'));
+    if (type === 'task') {
+      const scope = ['month', 'week', 'day'].includes(it.scope) ? it.scope : 'month';
+      const due = scope === 'month' ? (dueFromText(text) ?? (Number.isInteger(it.due) && it.due >= 1 && it.due <= 31 ? it.due : 31)) : null;
+      out.push({ type: 'task', scope, due, title: cleanTitle(it.title).slice(0, 40) || text.slice(0, 20), text, manual });
+    } else {
+      out.push({ type: 'note', manual, target, title: cleanTitle(it.title).slice(0, 40), text });
+    }
+  }
+  return out.slice(0, 12);
+}
+
+app.post('/api/import/analyze', authed, async (c) => {
+  const body = await c.req.json().catch(() => ({}));
+  const text = typeof body.text === 'string' ? body.text.trim().slice(0, 12000) : '';
+  if (!text) return c.json({ error: 'empty' }, 400);
+  const parts = [];
+  for (let i = 0; i < text.length; i += 1800) parts.push(text.slice(i, i + 1800));
+  const cat = catalog();
+  const items = []; let summary = '';
+  try {
+    for (const p of parts) {
+      const res = await ai(c, AI_MODEL, { messages: [{ role: 'system', content: IMPORT_SYSTEM(cat) }, { role: 'user', content: p }], response_format: { type: 'json_object' }, max_tokens: 1400, temperature: 0.1 });
+      let r = res?.response ?? res?.choices?.[0]?.message?.content;
+      if (typeof r === 'string') { const m = r.match(/\{[\s\S]*\}/); try { r = m ? JSON.parse(m[0]) : null; } catch { r = null; } }
+      if (r?.summary && !summary) summary = String(r.summary).slice(0, 200);
+      items.push(...normalizeItems(r?.items));
+    }
+  } catch { return c.json({ error: 'ai_failed' }, 502); }
+  if (!items.length) return c.json({ error: 'ai_empty' }, 422);
+  return c.json({ summary, items: items.slice(0, 16), manuals: Object.fromEntries(MANUAL.manuals.map((m) => [m.id, m.title])) });
+});
+
+app.post('/api/import/apply', authed, async (c) => {
+  const body = await c.req.json().catch(() => ({}));
+  const items = normalizeItems(body.items);
+  if (!items.length) return c.json({ error: 'empty' }, 400);
+  const uid = c.get('user').id;
+  const now = Date.now();
+  const st = c.env.DB.prepare('INSERT INTO additions (kind, manual, target, scope, due, title, text, source, created_by, created_at) VALUES (?,?,?,?,?,?,?,?,?,?)');
+  await c.env.DB.batch(items.map((i) => st.bind(i.type, i.manual, i.target ?? null, i.scope ?? null, i.due ?? null, i.title || null, i.text, 'voice', uid, now)));
+  return c.json({ added: items.length });
+});
+
+app.delete('/api/additions/:id', authed, async (c) => {
+  const id = Number(c.req.param('id'));
+  await c.env.DB.batch([
+    c.env.DB.prepare('DELETE FROM tasks WHERE tpl_id = ?').bind('x' + id),
+    c.env.DB.prepare('DELETE FROM additions WHERE id = ?').bind(id),
+  ]);
+  return c.json({ ok: true });
 });
 
 app.get('/healthz', (c) => c.text('ok'));

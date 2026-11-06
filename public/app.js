@@ -106,14 +106,16 @@ function showMain() {
       </div>
       <button class="avatar glass" data-testid="avatar" aria-label="account"></button>
     </div>`), h('<div class="view" data-testid="view"></div>'), h(`
-    <div class="modes glass" data-testid="modes"><i></i><button type="button" data-mode="memo" data-testid="mode-memo">メモ</button><button type="button" data-mode="ask" data-testid="mode-ask">質問</button></div>`), h(`
+    <div class="modebar">
+      <div class="modes glass" data-testid="modes"><i></i><button type="button" data-mode="memo" data-testid="mode-memo">メモ</button><button type="button" data-mode="ask" data-testid="mode-ask">質問</button><button type="button" data-mode="import" data-testid="mode-import">取込</button></div>
+      <button type="button" class="voice glass" data-testid="voice">${ICON.mic}<span>音声</span></button>
+      <button type="button" class="clip glass" data-testid="attach" aria-label="audio file">${ICON.clip}</button>
+    </div>`), h(`
     <form class="composer glass" autocomplete="off">
-      <button type="button" class="ib clip" data-testid="attach" aria-label="audio file">${ICON.clip}</button>
       <input type="file" accept="audio/*,video/mp4" hidden data-testid="file">
       <textarea rows="1" data-testid="input" enterkeyhint="send" aria-label="memo" autocapitalize="off" autofocus></textarea>
       <button type="button" class="ib ai" data-testid="ai" aria-label="AI" hidden>${ICON.spark}</button>
       <button type="submit" class="ib go" data-testid="add" aria-label="add" hidden>${ICON.send}</button>
-      <button type="button" class="ib mic" data-testid="mic" aria-label="voice">${ICON.mic}</button>
     </form>`));
 
   $view = $app.querySelector('.view');
@@ -122,7 +124,7 @@ function showMain() {
   $send = $composer.querySelector('.go');
   $ai = $composer.querySelector('.ai');
   $pill = $app.querySelector('.pill');
-  $attach = $composer.querySelector('.clip');
+  $attach = $app.querySelector('.clip');
   $file = $composer.querySelector('input[type=file]');
 
   const av = $app.querySelector('.avatar');
@@ -139,7 +141,7 @@ function showMain() {
     if (e.key === 'Enter' && !e.shiftKey && !e.isComposing && e.keyCode !== 229) { e.preventDefault(); submit(); }
   });
   $ai.onclick = runAI;
-  $composer.querySelector('.mic').onclick = toggleRecord;
+  $app.querySelector('.voice').onclick = toggleRecord;
   $attach.onclick = () => $file.click();
   $file.onchange = () => { const f = $file.files[0]; $file.value = ''; if (f) transcribeAndAdd(f, f.type || 'audio/mp4'); };
 
@@ -154,13 +156,12 @@ function setMode(mode) {
   const m = $app.querySelector('.modes');
   m.dataset.mode = mode;
   m.querySelectorAll('button').forEach((b) => b.setAttribute('aria-pressed', b.dataset.mode === mode));
-  $composer.classList.toggle('ask', mode === 'ask');
+  $composer.classList.toggle('ask', mode === 'ask' || mode === 'import');
   syncButtons();
 }
 function syncButtons() {
   const has = !!$input.value.trim();
-  $send.hidden = !has; $ai.hidden = !has || state.mode === 'ask';
-  $composer.querySelector('.mic').hidden = has;
+  $send.hidden = !has; $ai.hidden = !has || state.mode !== 'memo';
 }
 
 function toggleMenu() {
@@ -193,7 +194,19 @@ async function setScope(scope, initial = false) {
 const skeletonList = () => h('<div class="list">' + '<div class="sk sk-card"></div><div class="sk sk-card w2"></div><div class="sk sk-card"></div>'.repeat(2) + '</div>');
 
 function tick() {
-  if (state.scope === 'day' && !document.querySelector('.card.drag') && !document.hidden) render(false);
+  if (state.scope !== 'day' || document.querySelector('.card.drag') || document.hidden) return;
+  const { min } = clock();
+  const sig = layoutSig(min);
+  if (sig === state.sig) {
+    // same sections and order: only refresh the countdown texts and the clock, never rebuild the view
+    const clockEl = $view.querySelector('.clock'); if (clockEl) clockEl.textContent = hm(min);
+    for (const sec of daySections(state.tasks, min)) for (const g of sec.groups) for (const t of g.tasks) { const r = rows.get(t.id); if (r) setSub(r, t, groupHead(g, sec, min).sub); }
+    return;
+  }
+  render(false);
+}
+function layoutSig(min) {
+  return daySections(state.tasks, min).map((sec) => sec.key + ':' + sec.groups.map((g) => g.tasks.map((t) => t.id).join(',')).join(';')).join('|');
 }
 
 /* ---------------- task views ---------------- */
@@ -214,12 +227,15 @@ function groupBySlot(tasks) {
 
 function render(animate) {
   if (state.scope === 'manual') return;
+  // read the scroll position first: rebuilding moves the reused rows out of the old list and would clamp it to 0
+  const keepScroll = $view.querySelector('.list')?.scrollTop ?? 0;
   const { min } = clock();
   const tasks = state.tasks;
   const p = progress(tasks);
   const frag = document.createDocumentFragment();
+  if (state.scope === 'day') state.sig = layoutSig(min);
 
-  const hero = h(`<div class="hero glass" data-testid="hero">
+  const hero = h(`<div class="hero glass${animate ? '' : ' still'}" data-testid="hero">
     <div class="ring"><svg viewBox="0 0 44 44"><circle cx="22" cy="22" r="18" class="bg"/><circle cx="22" cy="22" r="18" class="fg" pathLength="100" stroke-dasharray="0 100"/></svg><b>${p.total ? Math.round((p.done / p.total) * 100) : 0}<i>%</i></b></div>
     <div class="hero-t"><div class="clock" data-testid="clock">${state.scope === 'day' ? hm(min) : p.done + '/' + p.total}</div><div class="now-slot" data-testid="now-slot"></div></div>
     <div class="count"><b>${p.done}</b>/${p.total}</div>
@@ -261,9 +277,10 @@ function render(animate) {
   if (!tasks.length && state.scope === 'day' && new Date(clock().date + 'T00:00:00').getDay() === 0) nowText = '日曜休み';
   hero.querySelector('.now-slot').textContent = nowText;
   frag.append(list);
-  const scrollTop = $view.querySelector('.list')?.scrollTop ?? 0;
+  const scrollTop = keepScroll;
   $view.replaceChildren(frag);
-  if (!animate) $view.querySelector('.list').scrollTop = scrollTop;
+  const nl = $view.querySelector('.list');
+  if (!animate) { nl.scrollTop = scrollTop; requestAnimationFrame(() => { nl.scrollTop = scrollTop; }); }
 }
 
 function groupHead(g, sec, min) {
@@ -383,7 +400,12 @@ function makeRow(task) {
   </div>`);
   row.querySelector('.t').textContent = task.title;
   if (task.tag) { const c = row.querySelector('.chip'); c.hidden = false; c.textContent = task.tag.t; c.style.setProperty('--tc', task.tag.c); }
-  const hasDetail = !!(task.detail || task.manual || task.items);
+  const hasDetail = !!(task.detail || task.manual || task.items || task.notes?.length);
+  if (task.notes?.length) {
+    const nb = h('<div class="task-notes"></div>');
+    task.notes.forEach((n) => nb.append(h(`<div class="tn"><b>追記</b><span>${esc(n.text)}</span></div>`)));
+    row.querySelector('.det-i').prepend(nb);
+  }
   if (hasDetail) {
     row.querySelector('.det-t').textContent = task.detail || '';
     row.classList.add('has-detail');
@@ -427,6 +449,7 @@ function submit() {
   $input.value = ''; autosize(); syncButtons();
   $input.focus();
   if (state.mode === 'ask') return askQ(v);
+  if (state.mode === 'import') return importText(v);
   addTitles([v]);
 }
 
@@ -450,7 +473,7 @@ async function runAI() {
 /* voice: record -> Workers AI Whisper -> Workers AI splits into tasks */
 let rec = null;
 async function toggleRecord() {
-  const btn = $composer.querySelector('.mic');
+  const btn = $app.querySelector('.voice');
   if (rec) { rec.stop(); return; }
   let stream;
   try { stream = await navigator.mediaDevices.getUserMedia({ audio: true }); } catch { return toast('Mic Error'); }
@@ -461,22 +484,23 @@ async function toggleRecord() {
   mr.onstop = () => {
     stream.getTracks().forEach((t) => t.stop());
     clearInterval(timer); rec = null;
-    btn.classList.remove('rec'); btn.innerHTML = ICON.mic; $composer.classList.remove('recording');
+    btn.classList.remove('rec'); btn.innerHTML = `${ICON.mic}<span>音声</span>`; $composer.classList.remove('recording');
     transcribeAndAdd(new Blob(chunks, { type: mr.mimeType || 'audio/mp4' }), mr.mimeType || 'audio/mp4');
   };
   mr.start();
   rec = mr;
-  btn.classList.add('rec'); btn.innerHTML = ICON.stop; $composer.classList.add('recording');
+  btn.classList.add('rec'); btn.innerHTML = `${ICON.stop}<span>停止</span>`; $composer.classList.add('recording');
   const t0 = Date.now();
   const timer = setInterval(() => { if (Date.now() - t0 > 120000) mr.stop(); }, 1000);
 }
 
 async function transcribeAndAdd(blob, type) {
-  const btn = $composer.querySelector('.mic');
+  const btn = $app.querySelector('.voice');
   btn.classList.add('busy'); $composer.classList.add('working');
   try {
     const { text } = await api('/api/ai/transcribe', 'POST', null, { data: blob, type: type.split(';')[0] });
     if (state.mode === 'ask') { await askQ(text); return; }
+    if (state.mode === 'import') { await importText(text); return; }
     let tasks;
     try { tasks = await organize(text); } catch { tasks = [text]; }
     await addTitles(tasks);
@@ -780,6 +804,11 @@ async function openManual(id, anchor) {
     add.onclick = async () => { try { const r = await api(`/api/manuals/${id}/add`, 'POST', { date: clock().date }); toast(`+${r.added}`); } catch { toast('Error'); } };
     body.append(add);
   }
+  const noteEls = (m.notes || []).map((n) => {
+    const el = h(`<div class="note" data-note="${n.id}"><b>追記</b><span>${esc(n.text)}</span><button aria-label="delete">${ICON.x}</button></div>`);
+    el.querySelector('button').onclick = async () => { try { await api(`/api/additions/${n.id}`, 'DELETE'); el.remove(); } catch {} };
+    return { n, el };
+  });
   (m.visuals || []).forEach((v) => body.append(renderVisual(v)));
   m.media.forEach((f) => body.append(h(`<img class="md-img" src="/media/${esc(f)}" alt="" loading="lazy">`)));
   if (m.body) {
@@ -798,12 +827,53 @@ async function openManual(id, anchor) {
   }
   closeable(doc);
   $app.append(doc);
+  if (noteEls.length) {
+    const orphan = h('<section class="blk notes-top"><h3>追記</h3></section>');
+    for (const { n, el } of noteEls) {
+      const host = n.target ? [...doc.querySelectorAll('[data-anchor]')].find((e) => e.dataset.anchor === n.target) : null;
+      if (host) host.after(el); else orphan.append(el);
+    }
+    if (orphan.children.length > 1) body.prepend(orphan);
+  }
   if (anchor) setTimeout(() => {
     const t = [...doc.querySelectorAll('[data-anchor]')].find((e) => e.dataset.anchor === anchor) || [...doc.querySelectorAll('h4, h3')].find((e) => e.textContent.includes(anchor));
     if (!t) return;
     t.scrollIntoView({ block: 'center', behavior: 'smooth' });
     t.classList.add('hl');
   }, 650);
+}
+
+/* ---------------- import: voice/text -> manuals & task flow ---------------- */
+async function importText(text) {
+  document.querySelector('.answer')?.remove();
+  const el = h(`<div class="answer glass imp" data-testid="import"><button class="a-x" aria-label="close">${ICON.x}</button>
+    <div class="a-q">取込</div><div class="a-quote">${esc(text.slice(0, 160))}${text.length > 160 ? '…' : ''}</div>
+    <div class="a-b"><div class="sk sk-line"></div><div class="sk sk-line w2"></div><div class="sk sk-line w3"></div></div></div>`);
+  el.querySelector('.a-x').onclick = () => { el.classList.add('out'); setTimeout(() => el.remove(), 300); };
+  $app.append(el);
+  let r;
+  try { r = await api('/api/import/analyze', 'POST', { text }); } catch (e) { if (e.message !== 'unauthorized') el.querySelector('.a-b').textContent = 'Error'; return; }
+  const b = el.querySelector('.a-b');
+  b.innerHTML = `${r.summary ? `<div class="imp-sum">${esc(r.summary)}</div>` : ''}<div class="imp-list"></div><button class="go-btn imp-go" data-testid="import-apply">${ICON.check}<span>取り込む</span></button>`;
+  const list = b.querySelector('.imp-list');
+  const where = (it) => it.type === 'task'
+    ? `${it.scope === 'month' ? '今月' : it.scope === 'week' ? '今週' : '今日'}${it.due ? ` ${it.due}日` : ''} · タスク追加`
+    : `${r.manuals[it.manual] || ''} · 追記`;
+  r.items.forEach((it) => {
+    const row = h(`<label class="imp-i on"><input type="checkbox" checked><div><div class="imp-w">${esc(where(it))}</div>${it.title ? `<div class="imp-t">${esc(it.title)}</div>` : ''}<div class="imp-x">${esc(it.text)}</div></div></label>`);
+    row.querySelector('input').onchange = (e) => row.classList.toggle('on', e.target.checked);
+    list.append(row);
+  });
+  b.querySelector('.imp-go').onclick = async () => {
+    const chosen = r.items.filter((_, i) => list.children[i].querySelector('input').checked);
+    if (!chosen.length) return;
+    try {
+      const res = await api('/api/import/apply', 'POST', { items: chosen });
+      toast(`+${res.added}`);
+      el.classList.add('out'); setTimeout(() => el.remove(), 300);
+      state.manuals = []; if (state.scope !== 'manual') reload();
+    } catch { toast('Error'); }
+  };
 }
 
 /* ---------------- ask the manuals ---------------- */

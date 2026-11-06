@@ -12,3 +12,8 @@ CREATE TABLE IF NOT EXISTS tasks (
 );
 CREATE INDEX IF NOT EXISTS tasks_user ON tasks(user_id, scope, period);
 CREATE UNIQUE INDEX IF NOT EXISTS tasks_tpl ON tasks(user_id, tpl_id, period) WHERE tpl_id IS NOT NULL;
+CREATE TABLE IF NOT EXISTS additions (
+  id INTEGER PRIMARY KEY, kind TEXT NOT NULL, manual TEXT, target TEXT, scope TEXT, due INTEGER,
+  title TEXT, text TEXT, source TEXT, created_by INTEGER, created_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS additions_manual ON additions(manual, kind);
